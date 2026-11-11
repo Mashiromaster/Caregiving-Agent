@@ -1,0 +1,93 @@
+# 守望者 FallGuard · 跌倒预警系统配置
+# 复制为 config.toml 后修改。形如 "env:XXX" 的值会在运行时从同名环境变量读取。
+
+[scene]
+resident_name = "张**"        # 语音播报用，建议脱敏
+place = "3号楼412房间"         # 位置，四要素之一
+institution = "深圳某颐养院"
+
+[camera]
+source = 0                    # 摄像头序号 / 视频文件路径 / "demo" 自检 / "screen" 屏幕捕获
+width = 1280
+height = 720
+fps = 15
+flip = false                  # 画面左右镜像
+# source="screen" 时裁剪画面的某一块（归一化 x,y,w,h），只看屏幕上的视频区域可降误报
+# screen_crop = [0.0, 0.0, 0.5, 1.0]
+
+[detector]
+backend = "auto"              # auto | mediapipe | yolo | motion
+min_person_score = 0.5
+lying_angle_deg = 60.0        # 躯干与竖直方向夹角 ≥ 此值视为躺倒（0=站立，90=水平）
+lying_angle_hysteresis = 8.0  # 迟滞：已判躺倒后退出门限降低此度数，避免在阈值附近反复横跳
+lying_aspect = 1.25           # 无骨骼点时的兜底：人体框宽高比 ≥ 此值视为躺倒
+floor_y = 0.50                # 质心归一化纵坐标 ≥ 此值才算"在地面高度"，设 0 可关闭
+descent_rate_min = 0.25       # 质心下降速率阈值（归一化高度/秒）
+descent_window_s = 1.2        # 下降速率统计窗口
+lying_seconds = 2.5           # 下降后保持躺倒多久确认（双条件路径）
+lying_only_seconds = 8.0      # 未捕捉到下降过程时，单纯躺倒多久确认（低置信路径）
+lying_grace_s = 1.0           # 躺倒计时允许中断多久（姿态估计在地面姿态上会抖动/丢帧）
+lying_min_density = 0.6       # 中断期内躺倒帧占比下限，低于此值视为姿态不稳而非持续躺倒
+static_motion_max = 0.012     # 躺倒期间平均体动能量上限，超过视为主动躺卧
+cooldown_seconds = 120        # 一次事件后的静默期，避免重复触发
+exclude_zones = []            # 躺倒属正常的区域（床铺等），归一化 [[x1,y1,x2,y2]]
+
+[evidence]
+dir = "data/evidence"
+pre_seconds = 5               # 回溯保存跌倒前多少秒
+post_seconds = 10             # 继续保存跌倒后多少秒
+keyframe_offsets = [0.0, 2.0, 5.0]   # 关键帧截图时间点（相对跌倒时刻）
+
+[alert]
+cancel_seconds = 10           # 倒计时取消窗口；窗口内按 C（预览窗）或回车（终端）可取消
+speak = true                  # 本机语音播报
+alarm_sound = true            # 本机告警音
+voice = ""                    # macOS say 的音色，中文可填 Tingting；留空用系统默认
+suppress_call_windows = []    # 这些时段只记录不外呼，如 ["06:30-07:30", "20:30-21:30"]
+
+[agent]
+enabled = true
+base_url = "https://api.deepseek.com"   # OpenAI 兼容端点；也可指向本地推理服务
+api_key = "env:DEEPSEEK_API_KEY"
+model = "deepseek-chat"
+temperature = 0.2
+max_steps = 8
+deadline_seconds = 20         # 智能体未在此时限内完成处置，确定性兜底接管
+
+[call]
+provider = "aliyun"           # aliyun | tencent | none
+dry_run = true                # true 时只打印请求不真拨号；联调通过后改 false
+play_times = 2
+max_calls_per_event = 2
+call_all_contacts = false     # false=呼通一个即停；true=按顺序全部呼叫
+
+[[call.contacts]]
+id = "nurse_station"
+name = "值班护士站"
+phone = "13800000001"
+role = "caregiver"
+
+[[call.contacts]]
+id = "family_primary"
+name = "家属-张女士"
+phone = "13800000002"
+role = "family"
+
+[call.aliyun]
+# 语音通知 dyvmsapi SingleCallByTts
+access_key_id = "env:ALIYUN_ACCESS_KEY_ID"
+access_key_secret = "env:ALIYUN_ACCESS_KEY_SECRET"
+called_show_number = ""       # 已认证的主叫号码，留空用系统默认外显
+tts_code = "TTS_000000000"    # 控制台审核通过的模板 Code
+# 模板文本示例：${name}于${time}在${place}检测到跌倒，请立即前往
+tts_param_keys = ["name", "time", "place"]
+
+[call.tencent]
+# 语音消息 vms SendTtsVoice
+secret_id = "env:TENCENT_SECRET_ID"
+secret_key = "env:TENCENT_SECRET_KEY"
+region = "ap-guangzhou"
+voice_sdk_app_id = ""
+template_id = ""
+# TemplateParamSet 按顺序填充，与下列键一致
+template_param_keys = ["name", "time", "place"]

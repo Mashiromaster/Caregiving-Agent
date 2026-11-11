@@ -1,0 +1,193 @@
+# -*- coding: utf-8 -*-
+"""结构化体检：main.py doctor 的同款检查，输出 JSON 供面板渲染。
+
+每项给出 status（ok | warn | fail | skip）、一句结论、以及可操作的修复建议——
+面板上的「体检」页只负责把它画出来，判断逻辑都在这里。
+
+摄像头探测会真的打开一次设备（这是唯一能确认授权是否到位的方法），
+所以运行中不做此项：设备已被运行器占用，探测必然失败而且会干扰取帧。
+"""
+from __future__ import annotations
+
+import shutil
+import sys
+from typing import Any
+
+from .. import config as cfgmod
+
+
+def _item(name: str, status: str, detail: str = "", hint: str = "") -> dict[str, Any]:
+    return {"name": name, "status": status, "detail": detail, "hint": hint}
+
+
+def _deps() -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    try:
+        import cv2
+        out.append(_item("opencv", "ok", f"{cv2.__version__}"))
+    except Exception as exc:
+        out.append(_item("opencv", "fail", str(exc),
+                         "pip3 install opencv-python —— 缺它整个系统跑不起来"))
+        return out
+
+    from ..pose import available
+    have = available()
+    notes = {"mediapipe": "骨骼点判定，推荐",
+             "yolo": "多人场景更准，依赖 torch（约 2GB）",
+             "motion": "零依赖兜底，无骨骼点"}
+    installs = {"mediapipe": "pip3 install mediapipe",
+                "yolo": "pip3 install ultralytics"}
+    for name, ok in have.items():
+        if name == "motion":
+            out.append(_item(f"姿态后端 {name}", "ok", notes[name]))
+            continue
+        out.append(_item(f"姿态后端 {name}", "ok" if ok else "warn", notes[name],
+                         "" if ok else installs[name]))
+    if not have["mediapipe"] and not have["yolo"]:
+        out.append(_item("判定精度", "warn", "只有 motion 后端可用，判定退化为人体框宽高比",
+                         "pip3 install mediapipe 可显著提升精度"))
+    return out
+
+
+def _local_tools() -> list[dict[str, Any]]:
+    out = []
+    targets = (("say", "语音播报"), ("afplay", "告警音"), ("osascript", "系统通知"))
+    if sys.platform != "darwin":
+        targets = (("espeak-ng", "语音播报"), ("paplay", "告警音"),
+                   ("notify-send", "系统通知"))
+    for tool, desc in targets:
+        ok = shutil.which(tool) is not None
+        out.append(_item(f"{desc}（{tool}）", "ok" if ok else "warn",
+                         "可用" if ok else "未找到该命令",
+                         "" if ok else f"缺失时{desc}会降级为终端打印，不影响外呼"))
+    return out
+
+
+def _camera(cfg, running: bool) -> list[dict[str, Any]]:
+    if running:
+        return [_item("视频源", "skip", "系统正在运行，跳过探测",
+                      "运行中设备已被占用，停止后再体检可验证授权")]
+    source = cfg.camera.source
+    try:
+        from ..capture import open_source
+        src = open_source(cfg)
+        try:
+            item = src.read()
+            if item is None:
+                return [_item("视频源", "fail", f"source={source} 打开成功但读帧失败",
+                              "检查设备是否被其他程序（会议软件、另一个 FallGuard）占用")]
+            h, w = item[1].shape[:2]
+            return [_item("视频源", "ok", f"source={source} 读帧成功 {w}x{h}")]
+        finally:
+            src.close()
+    except Exception as exc:
+        hint = "改用 source=demo 做无摄像头自检，或 source=screen 走屏幕捕获"
+        if sys.platform == "darwin":
+            hint = ("macOS 需在 系统设置 → 隐私与安全性 → 摄像头 中授权运行本程序的终端；"
+                    "终端宿主拿不到授权时改用 source=screen，无设备时用 source=demo")
+        return [_item("视频源", "fail", f"source={source} 打开失败：{exc}", hint)]
+
+
+def _call(cfg) -> list[dict[str, Any]]:
+    from ..alerts import CallGateway
+
+    out: list[dict[str, Any]] = []
+    gw = CallGateway(cfg)
+    has_provider = gw.provider_name != "none"
+    out.append(_item("外呼通道", "ok" if has_provider else "warn", gw.describe(),
+                     "" if has_provider else "provider=none 时只记录事件不拨号"))
+
+    if not gw.contacts:
+        out.append(_item("联系人", "fail", "未配置任何联系人",
+                         "在「配置 → 联系人」里至少加一个 role=caregiver 的号码，"
+                         "否则判定成立后无人可呼"))
+    else:
+        roles = ", ".join(f"{c.id}({c.role})" for c in gw.contacts)
+        has_caregiver = any(c.role == "caregiver" for c in gw.contacts)
+        out.append(_item("联系人", "ok" if has_caregiver else "warn",
+                         f"{len(gw.contacts)} 位：{roles}",
+                         "" if has_caregiver
+                         else "没有 caregiver 角色，升级链会退化为按配置顺序呼叫"))
+
+    lack = gw.provider.missing()
+    if not has_provider:
+        pass
+    elif lack:
+        out.append(_item("通道凭据", "warn" if gw.dry_run else "fail",
+                         "待补：" + ", ".join(lack),
+                         "演练模式下不影响链路验证；关闭演练前必须补齐"
+                         if gw.dry_run else "真实拨号会直接返回 CONFIG_MISSING"))
+    else:
+        out.append(_item("通道凭据", "ok", "密钥与模板均已配置"))
+
+    dry = gw.dry_run
+    out.append(_item("拨号模式", "ok" if dry else "warn",
+                     "演练（dry_run=true），只打印参数不拨号" if dry
+                     else "真实拨号，判定成立会产生费用",
+                     "联调通过后在「配置 → 外呼」里关闭演练模式" if dry else ""))
+    return out
+
+
+def _agent(cfg) -> list[dict[str, Any]]:
+    a = cfg.agent
+    if not bool(a.enabled):
+        return [_item("智能体", "ok", "已关闭，走确定性规则处置",
+                      "规则处置同样完成外呼与播报，只是不会按现场情况调整顺序")]
+    if not str(a.api_key):
+        return [_item("智能体", "warn", "已启用但 api_key 为空，将降级为规则处置",
+                      "export DEEPSEEK_API_KEY=sk-xxx 后重启面板；"
+                      '配置里填 "env:DEEPSEEK_API_KEY" 即可读取')]
+    return [_item("智能体", "ok",
+                  f"{a.model} @ {a.base_url}，时限 {a.deadline_seconds}s",
+                  "模型超时或报错时确定性兜底会接管，不会导致没人去救")]
+
+
+def _thresholds(cfg) -> list[dict[str, Any]]:
+    d = cfg.detector
+    zones = list(d.exclude_zones or [])
+    cancel_s = float(cfg.alert.cancel_seconds)
+    return [
+        _item("判定阈值", "ok",
+              f"躺倒角 ≥{d.lying_angle_deg}°　下降速率 ≥{d.descent_rate_min}/s　"
+              f"双条件 {d.lying_seconds}s　单条件 {d.lying_only_seconds}s　"
+              f"静默期 {d.cooldown_seconds}s"),
+        _item("排除区域", "ok" if zones else "warn",
+              f"{len(zones)} 个" if zones else "未设置",
+              "" if zones
+              else "画面里有床铺时建议框出来，否则正常躺卧会被判成跌倒"),
+        _item("取消窗口", "ok" if cancel_s > 0 else "warn", f"{cancel_s:g}s",
+              "" if cancel_s > 0 else "为 0 时误报没有撤销机会，会直接外呼"),
+    ]
+
+
+def report(config_path: str | None = None, *, running: bool = False) -> dict[str, Any]:
+    groups: list[dict[str, Any]] = []
+    src = cfgmod.config_source(config_path)
+    groups.append({"title": "环境", "items": [
+        _item("Python", "ok", f"{sys.version.split()[0]} ({sys.platform})"),
+        _item("配置文件", "ok" if src.exists() else "warn", str(src),
+              "" if src.exists() else "尚未保存过配置，当前使用示例配置的默认值"),
+    ] + _deps()})
+    groups.append({"title": "本机告警", "items": _local_tools()})
+
+    try:
+        cfg = cfgmod.load(config_path)
+    except Exception as exc:
+        groups.append({"title": "配置", "items": [
+            _item("加载配置", "fail", str(exc), "检查 config.toml 语法")]})
+        return _summarize(groups)
+
+    groups.append({"title": "视频源", "items": _camera(cfg, running)})
+    groups.append({"title": "外呼", "items": _call(cfg)})
+    groups.append({"title": "智能体", "items": _agent(cfg)})
+    groups.append({"title": "判定", "items": _thresholds(cfg)})
+    return _summarize(groups)
+
+
+def _summarize(groups: list[dict[str, Any]]) -> dict[str, Any]:
+    counts = {"ok": 0, "warn": 0, "fail": 0, "skip": 0}
+    for g in groups:
+        for it in g["items"]:
+            counts[it["status"]] = counts.get(it["status"], 0) + 1
+    overall = "fail" if counts["fail"] else ("warn" if counts["warn"] else "ok")
+    return {"groups": groups, "counts": counts, "overall": overall}

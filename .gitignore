@@ -1,0 +1,35 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.Python
+
+# ---- 运行时产物（含住户画面与事件记录，绝不入库）----
+eldercare_ai/fall_guard/data/
+**/evidence/
+*.jsonl
+
+# ---- 本地配置（可能含真实密钥与联系人电话）----
+eldercare_ai/fall_guard/config.toml
+*.bak
+
+# ---- 模型权重：5.7MB，首次运行自动下载 ----
+eldercare_ai/fall_guard/models/*.task
+*.part
+
+# ---- 测试素材与临时视频 ----
+*.mp4
+*.raw
+!eldercare_ai/fall_guard/tools/**/*.py
+
+# ---- macOS ----
+.DS_Store
+.AppleDouble
+
+# ---- 融资材料：仓库公开，BP/PPT 含估值、财务预测与团队信息，不上传 ----
+eldercare_ai/docs/
+eldercare_ai/ppt/
+eldercare_ai/scripts/
+eldercare_ai/README.md

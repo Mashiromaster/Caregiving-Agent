@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>守望者 FallGuard · 控制台</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<aside class="sidebar">
+  <div class="brand">
+    <div class="logo">守</div>
+    <div class="brand-text">
+      <div class="brand-name">守望者 FallGuard</div>
+      <div class="brand-sub">跌倒预警 · 自动外呼</div>
+    </div>
+  </div>
+
+  <nav id="nav">
+    <button data-tab="overview" class="active">总览</button>
+    <button data-tab="live">实时监控</button>
+    <button data-tab="events">事件记录</button>
+    <button data-tab="config">配置</button>
+    <button data-tab="doctor">体检</button>
+  </nav>
+
+  <div class="side-foot">
+    <div id="side-state" class="pill pill-idle">未运行</div>
+    <div id="side-meta" class="side-meta">正在连接…</div>
+  </div>
+</aside>
+
+<main>
+  <header class="topbar">
+    <h1 id="page-title">总览</h1>
+    <div class="topbar-actions">
+      <span id="top-note" class="top-note"></span>
+      <button id="btn-start" class="btn btn-primary">启动监测</button>
+      <button id="btn-stop" class="btn" disabled>停止</button>
+    </div>
+  </header>
+  <section id="page" class="page"><div class="loading">加载中…</div></section>
+</main>
+
+<div id="toasts" class="toasts"></div>
+<script src="/app.js"></script>
+</body>
+</html>
