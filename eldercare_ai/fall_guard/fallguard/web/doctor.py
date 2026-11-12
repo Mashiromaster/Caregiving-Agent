@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import os
 import shutil
 import sys
 from typing import Any
@@ -140,6 +141,9 @@ def _call(cfg) -> list[dict[str, Any]]:
 
 
 def _agent(cfg) -> list[dict[str, Any]]:
+    if os.getenv("FALLGUARD_DSH_MODE") == "1":
+        return [_item("智能体", "ok", "由 DeepSeek Harness 负责对话和定时任务",
+                      "跌倒告警按确定性规则处置，不依赖模型在线")]
     a = cfg.agent
     if not bool(a.enabled):
         return [_item("智能体", "ok", "已关闭，走确定性规则处置",

@@ -11,7 +11,9 @@
 from __future__ import annotations
 
 import json
+import hmac
 import mimetypes
+import os
 import posixpath
 import re
 import threading
@@ -124,6 +126,7 @@ class App:
                 "contacts": len(cfg.get("call.contacts") or []),
                 "agent_enabled": bool(cfg.agent.enabled),
                 "agent_key": bool(str(cfg.agent.api_key or "")),
+                "dsh_mode": os.getenv("FALLGUARD_DSH_MODE") == "1",
                 "cancel_seconds": float(cfg.alert.cancel_seconds),
             }
             status["config_error"] = ""
@@ -397,6 +400,11 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "FallGuardWeb/1.0"
     app: App = None                      # 由 serve() 注入
 
+    def _authorized(self) -> bool:
+        secret = os.environ.get("FALLGUARD_INTERNAL_TOKEN")
+        return not secret or hmac.compare_digest(
+            self.headers.get("X-FallGuard-Token", ""), secret)
+
     def log_message(self, fmt: str, *args: Any) -> None:
         return                            # 访问日志会把面板轮询刷满屏幕
 
@@ -455,6 +463,9 @@ class Handler(BaseHTTPRequestHandler):
 
     # ------------------------------------------------------------ 入口
     def do_GET(self) -> None:
+        if not self._authorized():
+            self._send(403, {"error": "仅允许守望者 Agent 访问"})
+            return
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
         if path == "/api/stream.mjpg":
@@ -471,6 +482,9 @@ class Handler(BaseHTTPRequestHandler):
         self._static(path)
 
     def do_POST(self) -> None:
+        if not self._authorized():
+            self._send(403, {"error": "仅允许守望者 Agent 访问"})
+            return
         parsed = urllib.parse.urlparse(self.path)
         if not parsed.path.startswith("/api/"):
             self._send(404, {"error": "not found"})

@@ -4,14 +4,15 @@
 
 ```text
 浏览器（DeepSeek Harness Web，127.0.0.1:3080）
-  └─ DeepSeek Harness：会话、模型工具循环、定时任务、对话记录
-       └─ caregiving-fallguard 插件：status / start / stop / events
-            └─ 本机 FallGuard API（127.0.0.1:8777）
-                 └─ Python Runtime：感知插件 → 判定/分级 → 留证 → 取消窗口
-                      └─ 智能体处置或确定性兜底 → 外呼网关
+  ├─ 对话、模型工具循环、会话、定时任务
+  └─ 「守望者监控」侧栏 → /caregiving/ 同源面板
+       └─ caregiving-fallguard Host 插件
+            ├─ 管理 FallGuard 工作进程、工具调用、事件回报
+            └─ Python Runtime：感知插件 → 判定/分级 → 留证 → 取消窗口
+                 └─ 确定性处置 → 外呼网关 → 事件归档
 ```
 
-Harness 是对话与定时任务的主入口；FallGuard 是独立的长期监测服务。摄像头判定和取消窗口不依赖模型是否在线。事件成立后的外呼按 FallGuard 配置执行，`call.dry_run = true` 时只演练。前端实时画面、住户配置与事件证据仍在 `127.0.0.1:8777` 的专用面板。
+Harness 是应用 Host，插件负责启动、停止和回收 FallGuard 工作进程，并把监控页挂到同源路径 `/caregiving/`。浏览器只访问 Harness 入口；监控页需要 Harness 浏览器登录态，工作进程使用随机本机端口和临时凭据。摄像头判定、取消窗口与告警外呼不依赖模型是否在线。事件归档后，插件会把摘要送到最近操作监测的 DSH 对话中。`call.dry_run = true` 时只演练。
 
 ## 启动
 
@@ -22,7 +23,7 @@ npm ci
 python3.13 run.py
 ```
 
-打开 `http://127.0.0.1:3080`，在 Harness 设置中选择 DeepSeek 模型并配置 API Key。建议使用标准预设，它包含内置的 `schedule_*` 工具。在对话中可以说：
+打开 `http://127.0.0.1:3080`，在 Harness 设置中登录 DeepSeek 账号或配置 API Key。左侧的「守望者监控」打开实时画面、住户配置与事件证据。建议使用标准预设，它包含内置的 `schedule_*` 工具。在对话中可以说：
 
 - “查看跌倒监测状态和最近十条事件”
 - “启动跌倒监测”
@@ -31,12 +32,12 @@ python3.13 run.py
 
 Harness 的定时任务由运行中的 Host 触发。关掉 `run.py` 后监测服务和 Harness 一起停止，定时任务会保留，重新启动 Host 后按 Harness 的补发规则处理。
 
-首次使用前，在 `http://127.0.0.1:8777` 配置场景、联系人和外呼通道。确认外呼配置后再关闭演练模式。Harness 插件仅访问本机 API，不直接读取密钥或住户原始视频。
+首次使用前，在 `http://127.0.0.1:3080/caregiving/` 配置场景、联系人和外呼通道。确认外呼配置后再关闭演练模式。Harness 模型工具仅获得状态与事件摘要，不读取密钥或住户原始视频。
 
 ## 边界
 
-- 当前项目原有的 `fallguard/agent/harness.py` 是事件处置用的 DeepSeek API 工具循环；它不等于官方 DeepSeek Harness。Web 对话使用官方 `@deepseek-ai/dsh`，版本由 `package-lock.json` 固定。
+- 独立运行 FallGuard 时，原有的 `fallguard/agent/harness.py` 仍可用于事件处置。由 DSH 启动时只使用 DSH 的模型循环；实时告警按确定性规则处置，以保证模型故障时仍能外呼。
 - 跌倒判定与拨号是异步现实动作。`fallguard_start` 只表示监测线程启动，不能表示已经检测到跌倒或电话接通。外呼结果请查询事件记录。
-- 两个服务都只监听本机。当前 FallGuard 原型面板没有账户鉴权，不应直接开放到公网。
+- DSH 入口默认仅监听本机。面板代理使用 Harness 的 Host、Origin 和登录校验。FallGuard 工作进程额外验证临时凭据；不要把这套原型直接部署为公网服务。
 
 官方参考：[Harness 架构](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/architecture.md)、[插件教程](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/user/develop/basic/index.md)、[定时任务](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/user/guide/schedule.md)。

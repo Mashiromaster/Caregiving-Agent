@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 import urllib.error
 import urllib.request
@@ -254,7 +255,10 @@ def handle(cfg, ctx: T.ToolContext) -> AgentOutcome:
     agent_cfg = cfg.agent
     outcome: AgentOutcome
 
-    if bool(agent_cfg.enabled):
+    if os.environ.get("FALLGUARD_DSH_MODE") == "1":
+        # DSH 承担唯一模型循环；实时告警仍由确定性处置保证时限与外呼。
+        outcome = RulePlanner().run(ctx)
+    elif bool(agent_cfg.enabled):
         llm = LLMAgent(agent_cfg)
         if llm.usable:
             outcome = llm.run(ctx)

@@ -11,6 +11,7 @@ warnings 允许保存但提示（比如真实拨号模式下 TTS 模板还是占
 """
 from __future__ import annotations
 
+import os
 import re
 import tomllib
 from dataclasses import dataclass, field as dc_field
@@ -779,7 +780,8 @@ def _warnings(data: dict[str, Any]) -> list[str]:
         pass
 
     agent = data.get("agent") or {}
-    if bool(agent.get("enabled")) and not str(agent.get("api_key") or ""):
+    if (os.getenv("FALLGUARD_DSH_MODE") != "1" and bool(agent.get("enabled"))
+            and not str(agent.get("api_key") or "")):
         out.append("智能体已启用但未填 api_key，会降级为确定性规则处置（兜底外呼仍然生效）。")
 
     det = data.get("detector") or {}

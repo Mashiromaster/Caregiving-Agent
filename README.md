@@ -4,10 +4,10 @@
 FallGuard 插件负责监测、事件处置与外呼。
 
 ```
-DeepSeek Harness Web（对话 / 定时任务）
-   └─ caregiving-fallguard 工具插件 → FallGuard 本机 API
-      └─ 感知插件（跌倒 / 求助手势）→ 判定与分级 → 留证 → 取消窗口
-         └─ 智能体处置 / 确定性兜底 → 外呼网关 → 事件归档
+DeepSeek Harness Host（对话 / 定时任务 / 守望者监控页）
+   └─ caregiving-fallguard 插件（工具 / 工作进程 / 事件回报）
+      └─ FallGuard Runtime：感知插件（跌倒 / 求助）→ 分级 → 留证 → 取消窗口
+         └─ 确定性处置 → 外呼网关 → 事件归档
 ```
 
 ## 仓库内容
@@ -28,7 +28,7 @@ npm ci
 python3.13 run.py                 # 对话界面 http://127.0.0.1:3080
 ```
 
-在 Harness 设置里配置 DeepSeek API Key，然后通过对话启动监测或创建定时任务。专用监控与配置面板位于 `http://127.0.0.1:8777`。
+在 Harness 设置里登录 DeepSeek 账号或配置 API Key，然后通过对话启动监测或创建定时任务。「守望者监控」位于同一个界面的侧栏，面板路径为 `/caregiving/`。
 
 单独运行 FallGuard：
 

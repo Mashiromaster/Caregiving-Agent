@@ -1,13 +1,78 @@
 /** FallGuard tools for the official DeepSeek Harness Web profile. */
-export const name = 'caregiving-fallguard'
-export const inject = ['tools', 'systemPrompt']
+import { spawn } from 'node:child_process'
+import { createServer, request as httpRequest } from 'node:http'
+import { randomBytes, randomUUID } from 'node:crypto'
+import { fileURLToPath } from 'node:url'
+import { dirname, resolve } from 'node:path'
 
-const endpoint = process.env.FALLGUARD_API_URL || 'http://127.0.0.1:8777'
+export const name = 'caregiving-fallguard'
+export const inject = ['tools', 'systemPrompt', 'webServer', 'agents', 'connection']
+
+const fallguardDir = resolve(dirname(fileURLToPath(import.meta.url)), '../fall_guard')
+let endpoint = ''
+let internalToken = ''
+let lastAgentId = null
+
+async function freePort() {
+  return new Promise((resolvePort, reject) => {
+    const server = createServer()
+    server.once('error', reject)
+    server.listen(0, '127.0.0.1', () => {
+      const port = server.address().port
+      server.close(() => resolvePort(port))
+    })
+  })
+}
+
+async function waitForBackend(child, url, token) {
+  const until = Date.now() + 15000
+  while (Date.now() < until) {
+    if (child.exitCode !== null) throw new Error(`FallGuard worker exited: ${child.exitCode}`)
+    try {
+      const response = await fetch(`${url}/api/status`, {
+        headers: { 'x-fallguard-token': token }, signal: AbortSignal.timeout(700),
+      })
+      if (response.ok) return
+    } catch { /* worker may still be importing OpenCV */ }
+    await new Promise(done => setTimeout(done, 250))
+  }
+  throw new Error('FallGuard worker did not become ready')
+}
+
+function proxyPanel(req, res, port, token, connection) {
+  const rejection = connection.requestRejection(req)
+  if (rejection !== undefined) {
+    res.writeHead(rejection).end()
+    return
+  }
+  const url = new URL(req.url, 'http://localhost')
+  if (url.pathname === '/caregiving') {
+    res.writeHead(302, { location: '/caregiving/' })
+    res.end()
+    return
+  }
+  const path = url.pathname.slice('/caregiving'.length) + url.search
+  const headers = { ...req.headers, host: `127.0.0.1:${port}`,
+    'x-fallguard-token': token }
+  delete headers.connection
+  delete headers.cookie
+  delete headers.authorization
+  const upstream = httpRequest({ hostname: '127.0.0.1', port, path,
+    method: req.method, headers }, response => {
+    res.writeHead(response.statusCode || 502, response.headers)
+    response.pipe(res)
+  })
+  upstream.on('error', error => {
+    if (!res.headersSent) res.writeHead(502, { 'content-type': 'text/plain; charset=utf-8' })
+    res.end(`FallGuard worker unavailable: ${error.message}`)
+  })
+  req.pipe(upstream)
+}
 
 async function request(path, options = {}, signal) {
   const response = await fetch(`${endpoint}${path}`, {
     ...options,
-    headers: { 'content-type': 'application/json' },
+    headers: { 'content-type': 'application/json', 'x-fallguard-token': internalToken },
     signal,
   })
   const data = await response.json()
@@ -41,6 +106,7 @@ function register(ctx, { name, description, parameters, run }) {
       render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }],
     },
     async execute(args, exec) {
+      if (exec.agent?.id) lastAgentId = exec.agent.id
       try {
         return await run(args, exec.signal)
       } catch (error) {
@@ -51,12 +117,75 @@ function register(ctx, { name, description, parameters, run }) {
   })
 }
 
-export function apply(ctx) {
+export async function apply(ctx) {
+  const port = await freePort()
+  const python = process.env.FALLGUARD_PYTHON || 'python3.13'
+  const token = randomBytes(32).toString('hex')
+  const child = spawn(python, ['main.py', 'web', '--host', '127.0.0.1',
+    '--port', String(port), '--no-browser'], {
+    cwd: fallguardDir, stdio: 'inherit',
+    env: { ...process.env, FALLGUARD_INTERNAL_TOKEN: token,
+      FALLGUARD_DSH_MODE: '1' },
+  })
+  let spawnError
+  child.on('error', error => { spawnError = error })
+  ctx.effect(() => () => {
+    if (child.exitCode === null) child.kill('SIGINT')
+  })
+  endpoint = `http://127.0.0.1:${port}`
+  internalToken = token
+  try {
+    await waitForBackend(child, endpoint, token)
+  } catch (error) {
+    if (child.exitCode === null) child.kill('SIGINT')
+    throw spawnError || error
+  }
+  ctx.effect(() => ctx.webServer.register({
+    kind: 'prefix', path: '/caregiving',
+    handler: (req, res) => proxyPanel(req, res, port, token, ctx.connection),
+  }))
+  const seen = new Set()
+  const recent = await request('/api/events?limit=50')
+  for (const row of recent.data?.events || []) seen.add(row.event_id)
+  let active = true
+  let checking = false
+  const timer = setInterval(async () => {
+    if (!active || checking) return
+    checking = true
+    try {
+      const result = await request('/api/events?limit=50')
+      if (result.status !== 'success' || !active) return
+      const rows = result.data.events || []
+      for (const row of [...rows].reverse()) {
+        if (!row.event_id || seen.has(row.event_id)) continue
+        seen.add(row.event_id)
+        const agent = lastAgentId && ctx.agents.get(lastAgentId)
+        if (!agent) continue
+        const summary = {
+          event_id: row.event_id, event_type: row.event_type,
+          level: row.level, outcome: row.outcome, detected_at: row.detected_at,
+          calls_ok: row.calls_ok, agent_mode: row.agent_mode,
+        }
+        try {
+          agent.followup({
+            id: randomUUID(), role: 'user', source: { kind: 'caregiving-event' },
+            content: [{ type: 'text', text: `守望者监测刚归档新事件：${JSON.stringify(summary)}。请核对事件记录并向用户简洁报告，勿把外呼受理误说成接通。` }],
+          })
+        } catch (error) { console.warn('[caregiving] event delivery failed:', error) }
+      }
+      if (seen.size > 500) {
+        seen.clear()
+        for (const row of rows) seen.add(row.event_id)
+      }
+    } catch { /* backend may be restarting */ }
+    finally { checking = false }
+  }, 3000)
+  ctx.effect(() => () => { active = false; clearInterval(timer) })
   ctx.systemPrompt.section({
     name: 'caregiving:fallguard',
     order: 120,
     interpolate: false,
-    text: `你是守望者看护助手。用中文简洁回答。管理摄像头监测时使用 fallguard_* 工具；不要把模型推断当作已经检测到的事件。
+    text: `你是守望者看护助手。用中文简洁回答。管理摄像头监测时使用 fallguard_* 工具；不要把模型推断当作已经检测到的事件。监控与配置页在 /caregiving/，与对话界面由同一个 DSH Host 提供。
 跌倒检测与外呼由 FallGuard 运行时执行：事件成立后按已保存配置留证、给取消机会，再按联系人升级链外呼。启动前可用 fallguard_status 告知用户当前通道是否为演练模式、是否配置联系人。只有用户明确要求真实拨号时才用 fallguard_call_mode 开启真实拨号；配置变更后需重启监测。
 用户要求定时开启、停止或查询监测时，使用 Harness 自带的 schedule_create / schedule_list / schedule_view / schedule_edit 工具；定时指令应明确写出到点调用 fallguard_start 或 fallguard_stop。定时任务只有 Harness Host 运行时才会触发。
 不要自行声称电话已接通：外呼通道返回的“提交成功”只表示请求被平台受理。`,

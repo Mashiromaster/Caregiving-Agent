@@ -79,6 +79,14 @@ nav button {
   transition: background .12s, color .12s;
 }
 
+nav a {
+  display: block;
+  padding: 9px 11px;
+  color: var(--accent);
+  text-decoration: none;
+}
+nav a[hidden] { display: none; }
+
 nav button:hover { background: var(--panel); color: var(--text); }
 nav button.active { background: var(--panel-2); color: var(--text); font-weight: 500; }
 

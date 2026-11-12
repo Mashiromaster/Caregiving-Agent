@@ -3,6 +3,18 @@
   "private": true,
   "version": "0.1.0",
   "description": "DeepSeek Harness adapter for FallGuard",
+  "exports": {
+    "./client": "./lib/client.js"
+  },
+  "dsh": {
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-layout",
+        "@deepseek-ai/dsh-client-ui-sidebar"
+      ]
+    }
+  },
   "dependencies": {
     "@deepseek-ai/dsh": "0.2.2-rc.1"
   }

@@ -1,4 +1,6 @@
 'use strict';
+const API_BASE = location.pathname.startsWith('/caregiving/') ? '/caregiving' : '';
+const apiPath = (path) => API_BASE + path;
 /* 守望者 FallGuard 控制台前端。
    无构建步骤、无依赖——这是个单机运维面板，加 npm 工具链只会让部署变难。
    状态存在 S 里，每个页面是一个 render 函数，轮询拿 status 后只刷新需要变的部分。 */
@@ -42,7 +44,7 @@ const el = (tag, attrs, kids) => {
 };
 
 async function api(path, options) {
-  const res = await fetch(path, Object.assign({
+  const res = await fetch(apiPath(path), Object.assign({
     headers: { 'Content-Type': 'application/json' },
   }, options || {}));
   let body = null;
@@ -172,7 +174,9 @@ function renderOverview(root) {
       '演练模式开启中：会走完整链路但只打印请求参数，不真实拨号。联调通过后在「配置 → 外呼」里关闭。']);
     else blockers.push(['ok',
       '真实拨号已启用。下一次判定成立会实际打出电话并产生费用。']);
-    if (cfg.agent_enabled && !cfg.agent_key) blockers.push(['warn',
+    if (cfg.dsh_mode) blockers.push(['info',
+      '由 DeepSeek Harness 负责对话与定时任务；跌倒告警按确定性规则处置，模型离线时仍可运行。']);
+    else if (cfg.agent_enabled && !cfg.agent_key) blockers.push(['warn',
       '智能体已启用但未提供 api_key，会降级为确定性规则处置（兜底外呼仍然生效）。']);
     if (!cfg.cancel_seconds) blockers.push(['warn',
       '取消窗口为 0，误报没有人工撤销的机会。']);
@@ -209,7 +213,8 @@ function renderOverview(root) {
         el('span', { class: 'step', text: '留证' }), el('span', { class: 'arrow', text: '→' }),
         el('span', { class: 'step', text: `取消窗 ${cfg ? cfg.cancel_seconds : '?'}s` }),
         el('span', { class: 'arrow', text: '→' }),
-        el('span', { class: 'step', text: '智能体' }), el('span', { class: 'arrow', text: '→' }),
+        el('span', { class: 'step', text: cfg?.dsh_mode ? '规则处置' : '智能体' }),
+        el('span', { class: 'arrow', text: '→' }),
         el('span', { class: 'step', text: '外呼' }),
       ]),
       el('p', { class: 'card-desc', style: 'margin:10px 0 0',
@@ -357,7 +362,7 @@ function renderLive(root) {
     el('div', {}, [
       el('div', { class: 'viewport', id: 'viewport' },
          running
-           ? el('img', { id: 'stream', src: `/api/stream.mjpg?t=${Date.now()}`, alt: '实时画面' })
+           ? el('img', { id: 'stream', src: apiPath(`/api/stream.mjpg?t=${Date.now()}`), alt: '实时画面' })
            : el('div', { class: 'placeholder',
                 text: '未在运行。点右上角「启动监测」后这里会显示带判定叠加层的实时画面。' })),
       el('div', { class: 'live-actions' }, [
@@ -653,7 +658,7 @@ function eventDetailCard(ev) {
 
     shots.length ? el('h2', { text: '关键帧', style: 'margin-bottom:10px' }) : null,
     shots.length ? el('div', { class: 'shots' }, shots.map((name) => el('figure', {}, [
-      el('img', { src: `/api/events/${encodeURIComponent(evid)}/evidence/${encodeURIComponent(name)}`,
+      el('img', { src: apiPath(`/api/events/${encodeURIComponent(evid)}/evidence/${encodeURIComponent(name)}`),
                   loading: 'lazy', alt: name }),
       el('figcaption', { text: name.replace('keyframe_', '').replace('.jpg', '') }),
     ]))) : null,
@@ -661,7 +666,7 @@ function eventDetailCard(ev) {
     evd.clip ? el('div', { class: 'clip', style: 'margin-bottom:16px' }, [
       el('h2', { text: '现场短片', style: 'margin-bottom:10px' }),
       el('video', { controls: true, preload: 'metadata',
-        src: `/api/events/${encodeURIComponent(evid)}/evidence/${encodeURIComponent(evd.clip)}` }),
+        src: apiPath(`/api/events/${encodeURIComponent(evid)}/evidence/${encodeURIComponent(evd.clip)}`) }),
     ]) : null,
 
     el('h2', { text: '判定特征', style: 'margin-bottom:8px' }),
@@ -1250,6 +1255,7 @@ async function refreshLogs() {
 
 /* ------------------------------------------------------------------ 启动 */
 function init() {
+  if (API_BASE) $('#chat-link').hidden = false;
   for (const btn of document.querySelectorAll('#nav button')) {
     btn.addEventListener('click', () => {
       if (S.tab === 'config' && S.dirty && btn.dataset.tab !== 'config') {
@@ -1272,7 +1278,7 @@ function init() {
       img.removeAttribute('src');          // 断开连接，服务端随即释放席位
     } else if (img.dataset.paused) {
       delete img.dataset.paused;
-      img.src = `/api/stream.mjpg?t=${Date.now()}`;
+      img.src = apiPath(`/api/stream.mjpg?t=${Date.now()}`);
     }
   });
 
