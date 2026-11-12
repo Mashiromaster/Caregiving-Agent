@@ -4,6 +4,7 @@ __pycache__/
 *.egg-info/
 .venv/
 venv/
+node_modules/
 .Python
 
 # ---- 运行时产物（含住户画面与事件记录，绝不入库）----

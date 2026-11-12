@@ -1,26 +1,36 @@
 # Caregiving Agent · 守望者 Guardian AI
 
-面向养老院与卫健委/民政部门的智能看护系统：摄像头实时监测老人状态，
-检测到跌倒后由看护智能体自动分级、留证并拨打电话通知护理方与家属。
+面向养老机构的智能看护原型：DeepSeek Harness 提供对话与定时任务入口，
+FallGuard 插件负责监测、事件处置与外呼。
 
 ```
-摄像头 → 姿态估计 → 判定状态机 → 留证 → 本地告警 → 倒计时取消窗口
-                                                        ↓ 未取消
-                              事件归档 ← 智能体处置（外呼/播报/派单）
-                                            ↓ 失败
-                                       确定性兜底强制外呼
+DeepSeek Harness Web（对话 / 定时任务）
+   └─ caregiving-fallguard 工具插件 → FallGuard 本机 API
+      └─ 感知插件（跌倒 / 求助手势）→ 判定与分级 → 留证 → 取消窗口
+         └─ 智能体处置 / 确定性兜底 → 外呼网关 → 事件归档
 ```
 
 ## 仓库内容
 
 | 目录 | 说明 |
 | --- | --- |
-| [`eldercare_ai/fall_guard/`](eldercare_ai/fall_guard/) | **跌倒预警系统**（可运行原型，3400+ 行）。见[子项目 README](eldercare_ai/fall_guard/README.md) |
+| [`eldercare_ai/dsh/`](eldercare_ai/dsh/) | 官方 DeepSeek Harness 的对话入口与 FallGuard 插件。见[使用说明](eldercare_ai/dsh/README.md) |
+| [`eldercare_ai/fall_guard/`](eldercare_ai/fall_guard/) | 跌倒监测、求助手势、健康信号、事件处置和外呼。见[子项目 README](eldercare_ai/fall_guard/README.md) |
 
 配套的商业计划报告书、技术文档与融资演示文稿（含估值、财务预测与团队信息）
 未纳入本公开仓库。
 
 ## 快速开始
+
+```bash
+cd eldercare_ai/dsh
+npm ci
+python3.13 run.py                 # 对话界面 http://127.0.0.1:3080
+```
+
+在 Harness 设置里配置 DeepSeek API Key，然后通过对话启动监测或创建定时任务。专用监控与配置面板位于 `http://127.0.0.1:8777`。
+
+单独运行 FallGuard：
 
 ```bash
 cd eldercare_ai/fall_guard
@@ -29,7 +39,7 @@ pip3 install opencv-python mediapipe
 python3 main.py doctor               # 环境体检
 python3 main.py run --source demo    # 合成场景自检，无需摄像头
 python3 main.py run                  # 摄像头实时监测
-python3 tools/selftest.py            # 自检 73 项，不需摄像头与网络
+python3 tools/selftest.py            # 自检 245 项
 ```
 
 macOS 首次运行需在 系统设置 → 隐私与安全性 → 摄像头 授权终端。
@@ -43,7 +53,7 @@ macOS 首次运行需在 系统设置 → 隐私与安全性 → 摄像头 授�
 | --- | --- |
 | 真人跌倒序列检出 | 3/3，每段各触发一次 |
 | 误报（20s 静止站立 + 跌倒前片段） | 0 |
-| 自检套件 | 73 项全通过 |
+| 自检套件 | 245 项全通过（2026-11-12，本机 Python 3.13） |
 | LLM 不可用时的兜底外呼 | 实测 401 后兜底接管成功 |
 
 **验证缺口（重要）**：数据集服务器限流，未能取得日常活动（ADL）序列，
@@ -54,8 +64,7 @@ macOS 首次运行需在 系统设置 → 隐私与安全性 → 摄像头 授�
 
 这是单摄像头视觉原型，与文档中描述的正式方案差距在于：
 
-- **只有视觉单源**，无毫米波雷达交叉验证。黑暗、被褥覆盖、遮挡场景会漏报，卫生间无法部署。
-- **无个体基线建模**，阈值全局统一而非按人设定。
+- **跌倒检测主要依赖视觉**，无毫米波雷达交叉验证。黑暗、被褥覆盖、遮挡场景会漏报，卫生间无法部署。可穿戴数据接入和个体健康基线已实现软件接口，尚无真实设备长期验证。
 - **无多人跟踪**，画面内多人时只取面积最大的目标。
 - 本地留证未加密，不满足等保要求。
 
