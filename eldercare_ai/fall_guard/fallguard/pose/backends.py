@@ -8,6 +8,8 @@
 """
 from __future__ import annotations
 
+import threading
+
 import cv2
 import numpy as np
 
@@ -47,6 +49,8 @@ class MediaPipeBackend(PoseBackend):
     IDX = {
         "nose": 0, "l_sho": 11, "r_sho": 12, "l_hip": 23, "r_hip": 24,
         "l_knee": 25, "r_knee": 26, "l_ank": 27, "r_ank": 28,
+        # 手势识别用：MediaPipe Pose 的 33 点里手腕是 15/16、耳朵是 7/8
+        "l_wri": 15, "r_wri": 16, "l_ear": 7, "r_ear": 8,
     }
 
     def __init__(self, model_path: str | None = None, min_det: float = 0.4,
@@ -131,10 +135,35 @@ class MediaPipeBackend(PoseBackend):
         return span >= self.min_span
 
     def close(self) -> None:
-        try:
-            self._landmarker.close()
-        except Exception:
-            pass
+        """关闭 landmarker。
+
+        **必须在后台线程里关并设超时。** 实测 mediapipe 的
+        `PoseLandmarker.close()` 会卡在 C 层的 serial_dispatcher 里永不返回
+        （等一个不会完成的 executor 任务）——它不是慢，是死锁。
+
+        后果很严重：这条路径在 Runtime.close() 里，而 Runtime.close() 在
+        运行线程里。一旦卡住，运行线程永远不退出，状态停在 stopping，
+        摄像头句柄也永远不释放，下次启动必然"视频源结束"。用户看到的就是
+        "点停止没反应、界面卡死、再启动没画面"。
+
+        所以交给守护线程去做，主线程最多等 2 秒。关不掉就算了——进程退出
+        时操作系统会回收，比卡死整个应用强得多。
+        """
+        landmarker = getattr(self, "_landmarker", None)
+        self._landmarker = None
+        if landmarker is None:
+            return
+
+        def _close() -> None:
+            try:
+                landmarker.close()
+            except Exception:
+                pass
+
+        t = threading.Thread(target=_close, daemon=True,
+                             name="mp-landmarker-close")
+        t.start()
+        t.join(timeout=2.0)
 
 
 class YoloPoseBackend(PoseBackend):
@@ -145,6 +174,8 @@ class YoloPoseBackend(PoseBackend):
     IDX = {
         "nose": 0, "l_sho": 5, "r_sho": 6, "l_hip": 11, "r_hip": 12,
         "l_knee": 13, "r_knee": 14, "l_ank": 15, "r_ank": 16,
+        # 手势识别用：COCO-17 的手腕是 9/10、耳朵是 3/4
+        "l_wri": 9, "r_wri": 10, "l_ear": 3, "r_ear": 4,
     }
 
     def __init__(self, weights: str = "yolo11n-pose.pt", conf: float = 0.4,

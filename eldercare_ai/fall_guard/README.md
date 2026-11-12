@@ -97,13 +97,56 @@ python3 tools/trace.py --source 你录的视频.mp4
 
 ## 外呼配置
 
-支持阿里云语音通知与腾讯云语音消息，签名用标准库手写，不引入云厂商 SDK。
+### 先选通道：有没有营业执照决定了路线
+
+国内语音外呼受运营商实名制管控，**云厂商的语音通知一律要求企业实名认证 + 营业执照 + 话术报备**，个人账号开不了。这不是某一家的策略，阿里云、腾讯云、火山引擎都一样。
+
+| 通道 | 个人能否开通 | 适用 |
+| --- | --- | --- |
+| `spug` | **可以**，微信扫码即用 | 个人、小团队、原型验证 |
+| `aliyun` / `tencent` / `volc` | 需企业资质 | 机构正式部署 |
+
+`spug` 走的是 [Spug 推送助手](https://push.spug.cc/)——这类聚合平台用自己的企业资质承载合规。代价是按次计费比直连云厂商贵、多一层服务商依赖、文案渲染在平台侧。对告警通知这个用途够用，但别拿它做营销外呼，会被封号。
+
+### Spug（个人路线）
+
+1. [push.spug.cc](https://push.spug.cc/) 微信扫码登录
+2. 新建通知模板，通道选「电话」，内容写成 `#name#于#time#在#place#检测到跌倒，请立即前往`（变量名与 `param_keys` 对应）
+3. 复制模板编码（调用 URL 里 `/send/` 后面那段）填进 `call.spug.template_id`
+
+填了 `template_id` 就能用 `targets` 动态指定被叫号码，一个模板服务整条升级链。若只填 `user_id` 走 `/xsend` 简易接口，被叫人由 Spug 后台绑定决定，**此时联系人列表与升级链顺序都不生效**。
+
+### 云厂商（企业路线）
+
+签名全部用标准库手写，不引入云厂商 SDK。
+
+```bash
+export ALIYUN_ACCESS_KEY_ID=LTAI...        # 阿里云
+export ALIYUN_ACCESS_KEY_SECRET=...
+export VOLC_ACCESS_KEY=AKLT...             # 火山引擎
+export VOLC_SECRET_KEY=...
+```
+
+三家的模板都要在各自控制台申请并等审核通过（1-3 个工作日），**变量格式各不相同**：
+
+| 通道 | 模板变量格式 | 关键配置 | 变量传递方式 |
+| --- | --- | --- | --- |
+| `aliyun` | `${name}` | `tts_code` | `TtsParam` JSON |
+| `tencent` | 模板内置顺序 | `template_id` + `voice_sdk_app_id` | `TemplateParamSet` **按顺序** |
+| `volc` | `#name#` | `tts_resource_key` + `number_pool_no` | `PhoneParam` JSON |
+
+```
+阿里云：${name}于${time}在${place}检测到跌倒，请立即前往
+火山：  #name#于#time#在#place#检测到跌倒，请立即前往
+```
+
+照搬另一家的模板会播成空值。火山的变量名还不能含中文、区分大小写。火山另有一处与别家不同：外呼幂等由 `SingleOpenId` 保证，系统用「事件号 + 号码后四位」作为该 ID，所以同一起事件对同一个人不会因重试而打两通电话。
+
+### 通用
 
 **`call.dry_run = true` 是默认值**，此时只打印请求参数不真实拨号。先这样把链路跑通，参数确认无误后再改 `false`。
 
 ```bash
-export ALIYUN_ACCESS_KEY_ID=LTAI...
-export ALIYUN_ACCESS_KEY_SECRET=...
 python3 main.py call-test            # 演练，看参数
 python3 main.py call-test --real     # 真实拨号，会产生费用
 ```
@@ -112,13 +155,7 @@ python3 main.py call-test --real     # 真实拨号，会产生费用
 
 注意**演练一定返回成功**：`dry_run` 分支在校验凭据之前就返回了，所以演练通过不代表密钥和模板没问题。要确认凭据，看 `doctor` 或体检页的「通道凭据」一项。
 
-阿里云需要在控制台申请语音通知 TTS 模板并审核通过（1-3 个工作日），模板文本形如：
-
-```
-${name}于${time}在${place}检测到跌倒，请立即前往
-```
-
-把审核通过的模板 Code 填进 `call.aliyun.tts_code`，变量名与 `tts_param_keys` 对应。系统能提供的槽位只有 `name / time / place / event` 四个（见 `pipeline._slots()`），模板变量超出这个集合会播成空值。腾讯云的 `template_param_keys` 是**按顺序**填充 `TemplateParamSet` 的，顺序错了播报内容会串位。
+系统能提供的槽位只有 `name / time / place / event` 四个（见 `runtime._slots()`），模板变量超出这个集合会播成空值。腾讯云的 `template_param_keys` 是**按顺序**填充 `TemplateParamSet` 的，顺序错了播报内容会串位。
 
 播报内容强制包含**位置、姓名、事件、时间**四要素——夜间被叫醒的护工要能在 5 秒内听懂发生了什么。
 

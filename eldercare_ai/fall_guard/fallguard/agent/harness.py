@@ -22,18 +22,25 @@ from typing import Any
 
 from . import tools as T
 
-SYSTEM_PROMPT = """你是养老机构的值班看护智能体，负责处置刚刚检测到的跌倒事件。
+SYSTEM_PROMPT = """你是养老机构的值班看护智能体，负责处置刚刚判定成立的异常事件。
 
 你的职责：在最短时间内让"能去现场的人"知道并前往，并留下可追溯的处置记录。
 
 处置纪律（必须遵守）：
 1. 先呼护理方（role=caregiver），这是能最快到现场的人；确认护理方无法联系后才呼家属（role=family）。
 2. 外呼理由必须具体，写清为什么呼这个人。
-3. 可以用 speak 在现场播报，安抚老人并告知"已通知工作人员，请勿自行起身"——跌倒后自行起身是二次伤害的主因。
+3. 可以用 speak 在现场播报，安抚老人并告知"已通知工作人员"。若事件是跌倒类，
+   务必提醒不要自行起身——跌倒后自行起身是二次伤害的主因。
 4. 不要重复呼叫同一个人；不要超过外呼上限。
-5. 全部动作完成后调用 finish 给出一句话摘要和最终等级。
+5. 住户历史误报多时处置可更谨慎地措辞，但**不得因此跳过外呼**——
+   判定已由确定性规则作出，你的职责是执行处置而不是推翻判定。
+6. 可穿戴设备的健康趋势（静息心率、步行稳定性等）按天更新，说明的是近期
+   状态走向，**不代表此刻的紧急程度**。可以用它让通知内容更有信息量
+   （如"该住户近两周步行稳定性持续下降"），但不得用它推翻现场判定。
+7. 全部动作完成后调用 finish 给出一句话摘要和最终等级。
 
-风险等级口径：L3=跌倒且需立即到场（默认）；L4=疑似生命体征危急；L2=疑似误报但需关注。
+风险等级口径：L4=疑似生命体征危急；L3=需立即到场；L2=需关注；L1=仅记录。
+事件的初始等级已由规则引擎给出，除非你发现了规则未知的信息，否则沿用它。
 动作要快，不要反复查询信息，最多调用 2 次查询类工具。你的回复不会被人读到，只有工具调用才有效果。"""
 
 
@@ -73,17 +80,28 @@ def _chat(base_url: str, api_key: str, payload: dict[str, Any],
 
 
 def _brief(ctx: T.ToolContext) -> str:
-    f = ctx.record.features
-    return json.dumps({
-        "event_id": ctx.record.event_id,
+    """事件情境。事件语义全部来自插件的 narrate()，这里不认识任何具体事件类型。"""
+    rec = ctx.record
+    payload = {
+        "event_id": rec.event_id,
+        "event_type": rec.event_type,
         "detected_at": ctx.slots.get("time"),
         "place": ctx.scene.get("place"),
         "resident": ctx.scene.get("resident_name"),
-        "trigger": ctx.record.trigger,
-        "confidence": ctx.record.confidence,
-        "features": f,
-        "note": "现场无人值守，倒地者未自行起身。取消窗口已走完，未被人工取消。",
-    }, ensure_ascii=False)
+        "level": rec.level,
+        "grading": {k: rec.grading.get(k) for k in ("rule_id", "reason")},
+        "trigger": rec.trigger,
+        "confidence": rec.confidence,
+        "features": rec.features,
+        "situation": ctx.narration.get("brief", "异常事件已判定成立，请立即处置。"),
+    }
+    if ctx.memory:
+        payload["resident_memory"] = ctx.memory
+    if ctx.health:
+        # 只放聚合摘要。逐条读数会暴露住户作息细节（几点起夜、几点出门），
+        # 而处置判断用不到那个粒度——这是发给外部模型的隐私边界。
+        payload["health_trend"] = ctx.health
+    return json.dumps(payload, ensure_ascii=False)
 
 
 class RulePlanner:
@@ -97,14 +115,18 @@ class RulePlanner:
     def run(self, ctx: T.ToolContext) -> AgentOutcome:
         t0 = time.time()
         out = AgentOutcome(mode=self.mode)
+        narration = ctx.narration
+        noun = narration.get("noun", "异常")
         T.execute("notify_desktop", {
-            "title": "跌倒预警",
-            "message": f"{ctx.scene.get('place','')} {ctx.scene.get('resident_name','')} "
-                       f"疑似跌倒，正在外呼",
+            "title": narration.get("title", f"{noun}预警"),
+            "message": narration.get(
+                "desktop",
+                f"{ctx.scene.get('place','')} {ctx.scene.get('resident_name','')} "
+                f"疑似{noun}，正在外呼"),
         }, ctx)
-        T.execute("speak", {
-            "text": "检测到跌倒，已通知工作人员，请不要自行起身，我们马上到。",
-        }, ctx)
+        reassure = narration.get("reassure")
+        if reassure:
+            T.execute("speak", {"text": reassure}, ctx)
 
         caregivers = [c for c in ctx.gateway.contacts if c.role == "caregiver"]
         others = [c for c in ctx.gateway.contacts if c.role != "caregiver"]
@@ -118,7 +140,7 @@ class RulePlanner:
                 break
         T.execute("finish", {
             "summary": "按预设升级链完成外呼与现场播报",
-            "level": "L3",
+            "level": ctx.record.level,
         }, ctx)
         out.summary = ctx.record.agent.get("summary", "")
         out.elapsed_ms = int((time.time() - t0) * 1000)
@@ -147,7 +169,7 @@ class LLMAgent:
         out = AgentOutcome(mode=self.mode)
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": "跌倒事件已判定成立，请立即处置。事件详情：\n"
+            {"role": "user", "content": "事件已判定成立，请立即处置。事件详情：\n"
                                         + _brief(ctx)},
         ]
 

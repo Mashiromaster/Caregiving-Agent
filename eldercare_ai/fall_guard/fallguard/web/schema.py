@@ -124,6 +124,10 @@ SECTIONS: list[Section] = [
         Field("cancel_seconds", "取消窗口", "float",
               "判定成立后留多少秒给现场撤销；设 0 则立即外呼", min=0.0, max=300.0,
               unit="s"),
+        Field("help_cancel_seconds", "求助取消窗口", "float",
+              "住户主动求助（手势）的取消窗口。设得短是因为意图明确，"
+              "不该让求助者干等；但不建议设 0——误识别一次就是一通真实电话",
+              min=0.0, max=60.0, unit="s"),
         Field("speak", "本机语音播报", "bool"),
         Field("alarm_sound", "本机告警音", "bool"),
         Field("voice", "语音音色", "text", "macOS say 的音色名，中文可填 Tingting；留空用系统默认"),
@@ -145,7 +149,8 @@ SECTIONS: list[Section] = [
               "智能体未在此时限内完成，确定性兜底立即接管", min=1.0, max=300.0, unit="s"),
     ]),
     Section("call", "外呼", "", [
-        Field("provider", "外呼通道", "choice", choices=("none", "aliyun", "tencent")),
+        Field("provider", "外呼通道", "choice",
+              choices=("none", "spug", "aliyun", "tencent", "volc")),
         Field("dry_run", "演练模式", "bool",
               "开启时只打印请求参数不真实拨号。联调通过后再关闭"),
         Field("play_times", "播报次数", "int", "同一通电话里重复播报几遍", min=1, max=5),
@@ -187,10 +192,154 @@ SECTIONS: list[Section] = [
               "腾讯云按**顺序**填充 TemplateParamSet，顺序错了播报内容会串位。可用："
               + " / ".join(SLOT_KEYS), wide=True),
     ]),
+    Section("call.spug", "Spug 推送助手（个人可用）",
+            "**没有营业执照时用这个。** 阿里云/腾讯云/火山引擎的语音通知都要求企业实名"
+            "认证加话术报备，这是运营商实名制要求、换哪家都一样；Spug 这类聚合平台用"
+            "自己的资质承载合规，微信扫码即可用。代价是按次计费较贵、多一层服务商依赖。"
+            "注意 Spug 只能用官方固定模板（变量名写死为 key1/key2），所以要靠下面的"
+            "「变量填充」把四要素拼进去。", [
+        Field("template_id", "模板编码", "text",
+              "控制台创建语音模板后复制的编码（URL 里 /send/ 后面那段）。"
+              "填了它就能用 targets 动态指定被叫号码，一个模板服务整条升级链",
+              placeholder="A27L0abcbgEY", wide=True),
+        Field("template_vars", "变量填充", "lines",
+              "每行一条 平台变量=内容模板，用 {} 引用槽位。"
+              "例：key1={place}的{name}　key2={event}，{time}。"
+              "可用槽位：" + " / ".join("{%s}" % k for k in SLOT_KEYS),
+              placeholder="key1={place}的{name}", wide=True),
+        Field("user_id", "用户标识", "text",
+              "不建模板时的简易方式，走 /xsend 接口。接收人需在 Spug 后台绑定，"
+              "此时联系人列表的号码不生效", wide=True),
+        Field("param_keys", "直传槽位", "lines",
+              "仅自定义模板用得上：把同名槽位原样传给平台。"
+              "用官方模板时留空，改用上面的「变量填充」", wide=True),
+        Field("channel", "推送通道", "text",
+              "仅 /xsend 方式生效。voice=电话，可用 | 组合多通道如 voice|sms",
+              placeholder="voice", wide=True),
+    ]),
+    Section("call.volc", "火山引擎语音通知",
+            "语音服务 VMS 的 SingleBatchAppend 接口。**模板变量格式是 #name# 而不是 "
+            "${name}**，且变量名不能含中文。需要先在控制台建号码池并提交 TTS 模板审核。", [
+        Field("access_key_id", "AccessKeyId", "text",
+              '建议填 "env:VOLC_ACCESS_KEY"', wide=True),
+        Field("secret_access_key", "SecretAccessKey", "text",
+              '建议填 "env:VOLC_SECRET_KEY"', wide=True),
+        Field("region", "地域", "text", "默认 cn-north-1", placeholder="cn-north-1",
+              wide=True),
+        Field("number_pool_no", "号码池编号", "text",
+              "控制台「号码管理」里的号码池编号", wide=True),
+        Field("tts_resource_key", "TTS 模板 ResourceKey", "text",
+              "审核通过的模板的 ResourceKey（不是模板名）", wide=True),
+        Field("tts_param_keys", "模板变量名", "lines",
+              "与模板里的 #变量# 逐一对应，每行一个。可用：" + " / ".join(SLOT_KEYS),
+              wide=True),
+    ]),
     Section("log", "日志", "", [
         Field("dir", "事件日志目录", "text", "events.jsonl / labels.jsonl 的存放位置",
               wide=True),
     ]),
+    Section("gesture", "求助手势",
+            "住户把手举到耳边（打电话的姿势）并保持数秒即触发呼叫。"
+            "与跌倒告警不同，这是**住户主动发起**的，所以取消窗口很短"
+            "（见「本地告警」里的求助取消窗口），且不受抑制时段压制。", [
+        Field("hold_seconds", "保持时长", "float",
+              "手要在耳边保持多久才触发。调短更灵敏但容易被挠耳朵、"
+              "撩头发等动作误触发", min=0.5, max=30.0, unit="s"),
+        Field("near_ratio", "距离阈值", "float",
+              "手腕到耳朵的距离 ÷ 肩宽。按肩宽归一化是为了让远近不同的人"
+              "都能触发；调大更容易触发", min=0.1, max=3.0),
+        Field("cooldown_seconds", "静默期", "float",
+              "触发后多久内不再重复触发，避免一个动作打一串电话",
+              min=0.0, max=3600.0, unit="s"),
+        Field("min_keypoint_conf", "关键点置信度下限", "float",
+              "手腕点的最低置信度。实测自然垂手时仅 0.25~0.45，"
+              "设太高会让手势根本触发不了", min=0.0, max=1.0),
+        Field("grace_seconds", "丢点宽限", "float",
+              "举手时手臂常挡住面部导致关键点丢失，中断在此时长内不清零计时",
+              min=0.0, max=5.0, unit="s"),
+    ]),
+    Section("sensors", "感知插件",
+            "事件判定由插件产出，处置链路对事件类型一视同仁。新增感知能力只需加插件，不改处置逻辑。", [
+        Field("enabled", "启用的插件", "lines",
+              "每行一个插件名。可用：fall_vision（摄像头跌倒检测）、"
+              "help_gesture（举手求助手势，复用跌倒插件的骨骼点，不增加开销）",
+              wide=True),
+    ]),
+    Section("risk", "风险预警",
+            "与告警并行的独立通路：汇总步态、心率等连续信号算风险分，越阈只发提示**不外呼**。"
+            "跌倒告警不受它影响，反之亦然。", [
+        Field("enabled", "启用风险评分", "bool"),
+        Field("warn_score", "关注阈值", "float",
+              "风险分越过此值记一条 L1 预警", min=0.0, max=100.0, unit="分"),
+        Field("elevated_score", "偏高阈值", "float",
+              "越过此值记 L2 预警，仍不外呼", min=0.0, max=100.0, unit="分"),
+        Field("cooldown_seconds", "预警静默期", "float",
+              "两次预警的最小间隔，避免分数在阈值附近抖动时刷屏",
+              min=0.0, max=86400.0, unit="s"),
+    ]),
+    Section("memory", "记忆",
+            "住户画像与历史会在处置时注入智能体上下文，画像还会参与分级"
+            "（高跌倒风险住户单源判定即升级）。", [
+        Field("dir", "画像存放目录", "text", wide=True),
+        Field("history_days", "历史回溯天数", "float",
+              "召回最近多少天的事件作为上下文", min=1.0, max=365.0, unit="天"),
+    ]),
+    Section("identity", "身份识别",
+            "决定事件归属到谁、召回谁的记忆。按顺序尝试，先返回结果者胜出。"
+            "**认不出人不会阻断处置**——身份是增强项不是前置条件。", [
+        Field("providers", "识别顺序", "lines",
+              "每行一个：wristband_id（手环绑定，较准）/ room_binding（房间登记，兜底）。"
+              "face 暂未实现，原因见 identity/face.py", wide=True),
+    ]),
+    Section("identity.rooms", "房间绑定",
+            "房间与住户的登记关系。留空时退回使用「场景」里配的住户。", [
+        Field("room", "房间", "text", placeholder="3号楼412房间"),
+        Field("resident_id", "住户 ID", "text", "记忆按它召回，须唯一",
+              placeholder="R-0001"),
+        Field("name", "姓名", "text", placeholder="张**"),
+    ], kind="rows", path="identity.rooms"),
+    Section("identity.bands", "手环绑定", "手环 ID 与住户的对应关系。", [
+        Field("band_id", "手环 ID", "text", placeholder="BAND-0001"),
+        Field("resident_id", "住户 ID", "text", placeholder="R-0001"),
+        Field("name", "姓名", "text", placeholder="张**"),
+    ], kind="rows", path="identity.bands"),
+    Section("health", "健康档案",
+            "可穿戴设备（Apple Watch 等）数据的长期存档。与实时信号分开存："
+            "信号总线只留几分钟用于当前判断，档案留数周用于**个体基线**——"
+            "「心率 85」本身没有意义，「比他自己的静息基线高 18」才有。"
+            "这正是 README 里列为已知边界第一条的「无个体基线建模」。", [
+        Field("dir", "存放目录", "text", wide=True),
+        Field("baseline_days", "基线窗口", "float",
+              "个体基线取最近多少天的中位数。用中位数而非均值，"
+              "避免一次测量失误（手表没戴好）把基线带偏",
+              min=3.0, max=365.0, unit="天"),
+        Field("trend_days", "趋势窗口", "float",
+              "趋势比较的时间跨度，切成前后两半比均值", min=2.0, max=180.0,
+              unit="天"),
+        Field("min_interval_seconds", "最小记录间隔", "float",
+              "同一指标两条记录的最小间隔。模拟手环每 0.5 秒推一次，"
+              "不限流一天就是 17 万行；真实手表数据远稀疏于此，不受影响",
+              min=0.0, max=3600.0, unit="s"),
+    ]),
+    Section("devices.sources", "外部设备",
+            "手环等可穿戴设备。设备跑在独立线程，只产出连续信号不直接触发事件——"
+            "掉线不会影响摄像头判定。\n"
+            "接 Apple Watch 选 type=apple_health：苹果没有云端健康 API，"
+            "数据唯一出口是你自己的 iPhone，需用 Health Auto Export 这类 App "
+            "定时 POST 到 /api/device/push。手表数据按小时到达，"
+            "**只参与风险评分与个体基线，不用于实时告警**。", [
+        Field("type", "类型", "choice",
+              choices=("synthetic_band", "http_push", "apple_health")),
+        Field("device_id", "设备 ID", "text",
+              "推送时按它区分设备，须唯一", placeholder="band-01"),
+        Field("band_id", "手环 ID", "text", "与「手环绑定」里的 ID 对应",
+              placeholder="BAND-0001"),
+        Field("resident_id", "住户 ID", "text",
+              "健康数据归属到谁。apple_health 必填——个体基线要按人建立，"
+              "不绑的话多人的数据会混成一条基线",
+              placeholder="R-0001"),
+        Field("enabled", "启用", "bool"),
+    ], kind="rows", path="devices.sources"),
 ]
 
 
@@ -394,7 +543,10 @@ def validate(payload: dict[str, Any], *, base: dict[str, Any] | None = None
                         errors.append({"field": f"{sec.name}[{idx}].{f.key}",
                                        "label": f"{sec.title} 第 {idx + 1} 行 · {f.label}",
                                        "message": str(exc)})
-                if any(str(v).strip() for v in clean.values()):
+                # 判断"这一行是不是空行"时忽略布尔值：一个只剩 enabled=False
+                # 的行，str(False) 是非空字符串，会被误当成有内容而保留下来
+                if any(str(v).strip() for k, v in clean.items()
+                       if not isinstance(v, bool)):
                     rows_out.append(clean)
             parent_path, _, leaf = sec.path.rpartition(".")
             parent = _dig(data, parent_path) if parent_path else data
@@ -480,6 +632,70 @@ def _cross_checks(data: dict[str, Any]) -> list[dict[str, str]]:
             if float(off) < 0:
                 err(f"evidence.{key}", label, "时间点不能为负（回溯帧是自动保存的）")
                 break
+
+    # 感知插件：至少要有一个，否则系统什么都检测不到。
+    # 配置文件没写 [sensors] 时按运行时默认值看待——缺省不等于"配空了"。
+    sensors_tbl = data.get("sensors")
+    enabled = (sensors_tbl or {}).get("enabled")
+    if enabled is None:
+        enabled = ["fall_vision"] if sensors_tbl is None else []
+    known_sensors = {"fall_vision", "help_gesture"}
+    if not enabled:
+        err("sensors.enabled", "启用的插件",
+            "至少要启用一个感知插件，否则系统不会产生任何事件")
+    # 手势插件复用 fall_vision 产出的骨骼点，单独启用会永远检不到人
+    if "help_gesture" in enabled and "fall_vision" not in enabled:
+        err("sensors.enabled", "启用的插件",
+            "help_gesture 依赖 fall_vision 提供骨骼点，必须同时启用 fall_vision")
+    for name in enabled:
+        if name not in known_sensors:
+            err("sensors.enabled", "启用的插件",
+                f"未知插件 {name!r}，当前可用：{', '.join(sorted(known_sensors))}")
+
+    known_identity = {"room_binding", "wristband_id", "face"}
+    for name in (data.get("identity") or {}).get("providers") or []:
+        if name not in known_identity:
+            err("identity.providers", "识别顺序",
+                f"未知识别器 {name!r}，可选：{', '.join(sorted(known_identity))}")
+
+    seen_rid: set[str] = set()
+    for group, label in (("rooms", "房间绑定"), ("bands", "手环绑定")):
+        for idx, row in enumerate((data.get("identity") or {}).get(group) or []):
+            rid = str(row.get("resident_id") or "").strip()
+            if not rid:
+                err(f"identity.{group}[{idx}].resident_id", f"{label}第 {idx + 1} 行",
+                    "住户 ID 不能为空，记忆要按它召回")
+            key = f"{group}:{rid}"
+            if key in seen_rid:
+                err(f"identity.{group}[{idx}].resident_id", f"{label}第 {idx + 1} 行",
+                    f"同一组内住户 ID {rid!r} 重复")
+            seen_rid.add(key)
+
+    known_devices = {"synthetic_band", "http_push", "apple_health"}
+    seen_dev: set[str] = set()
+    for idx, row in enumerate((data.get("devices") or {}).get("sources") or []):
+        dtype = str(row.get("type") or "").strip()
+        did = str(row.get("device_id") or "").strip()
+        if dtype not in known_devices:
+            err(f"devices.sources[{idx}].type", f"设备第 {idx + 1} 行",
+                f"未知设备类型 {dtype!r}，可选：{', '.join(sorted(known_devices))}")
+        if did and did in seen_dev:
+            err(f"devices.sources[{idx}].device_id", f"设备第 {idx + 1} 行",
+                f"设备 ID {did!r} 重复，推送时无法区分")
+        seen_dev.add(did)
+        # 健康数据必须归到具体住户才能建个体基线。不绑的话数据全记在
+        # 空住户名下，多人部署时几个人的心率会混成一条基线——
+        # 而基线算错比没有基线更危险，它会让异常显得正常。
+        if dtype == "apple_health" and not str(row.get("resident_id") or "").strip():
+            err(f"devices.sources[{idx}].resident_id", f"设备第 {idx + 1} 行",
+                "接入健康数据必须填住户 ID，否则个体基线无法按人建立")
+
+    risk = data.get("risk") or {}
+    try:
+        if float(risk.get("warn_score", 45)) >= float(risk.get("elevated_score", 70)):
+            err("risk.warn_score", "关注阈值", "应低于偏高阈值，否则两级无法区分")
+    except (TypeError, ValueError):
+        pass
     return out
 
 
@@ -508,6 +724,29 @@ def _warnings(data: dict[str, Any]) -> list[str]:
         if extra:
             out.append(f"模板变量 {', '.join(extra)} 不在系统可提供的槽位里"
                        f"（{'/'.join(SLOT_KEYS)}），播报时会是空值。")
+    if provider == "spug":
+        spug = call.get("spug") or {}
+        tpl = str(spug.get("template_id") or "")
+        uid = str(spug.get("user_id") or "")
+        tvars = spug.get("template_vars") or []
+        if not tpl and not uid:
+            out.append("Spug 的模板编码与用户标识都没填，真实拨号会被拒绝。"
+                       "去 push.spug.cc 微信扫码登录后创建语音模板即可拿到。")
+        elif not tpl and uid:
+            out.append("只填了用户标识（走 /xsend 接口），此时被叫号码由 Spug 后台"
+                       "绑定决定，上面「联系人」里配的号码和升级链顺序都不生效。"
+                       "要按升级链呼叫请改用模板编码方式。")
+        if tpl and not tvars and not (spug.get("param_keys") or []):
+            out.append("填了模板编码但没配「变量填充」，播报内容会是空的。"
+                       "Spug 官方模板的变量名是 key1/key2，需要映射，"
+                       "例：key1={place}的{name}")
+        # 只校验引用的槽位名，不校验平台变量名——平台变量叫什么由模板决定
+        import re as _re
+        for line in tvars:
+            for ref in _re.findall(r"\{(\w+)\}", str(line)):
+                if ref not in SLOT_KEYS:
+                    out.append(f"变量填充里引用了 {{{ref}}}，但系统只能提供 "
+                               f"{'/'.join(SLOT_KEYS)}，它会原样播出去。")
     if provider == "tencent":
         ten = call.get("tencent") or {}
         if not str(ten.get("template_id") or "") or not str(ten.get("voice_sdk_app_id") or ""):
@@ -516,6 +755,19 @@ def _warnings(data: dict[str, Any]) -> list[str]:
         if extra:
             out.append(f"模板变量 {', '.join(extra)} 不在系统可提供的槽位里"
                        f"（{'/'.join(SLOT_KEYS)}），播报时会是空值。")
+    if provider == "volc":
+        volc = call.get("volc") or {}
+        if not str(volc.get("tts_resource_key") or ""):
+            out.append("火山引擎 TTS 模板 ResourceKey 未填，真实拨号会被拒绝。"
+                       "需在控制台创建模板并等审核通过（State=1）。")
+        if not str(volc.get("number_pool_no") or ""):
+            out.append("火山引擎号码池编号未填，真实拨号会被拒绝。")
+        extra = [k for k in (volc.get("tts_param_keys") or []) if k not in SLOT_KEYS]
+        if extra:
+            out.append(f"模板变量 {', '.join(extra)} 不在系统可提供的槽位里"
+                       f"（{'/'.join(SLOT_KEYS)}），播报时会是空值。")
+        out.append("火山引擎的模板变量格式是 #name# 而非 ${name}，"
+                   "且变量名不能含中文——照搬阿里云模板会播成空值。")
     if not dry:
         out.append("演练模式已关闭：下一次判定成立会真实拨号并产生费用。")
 
@@ -533,4 +785,21 @@ def _warnings(data: dict[str, Any]) -> list[str]:
     det = data.get("detector") or {}
     if str(det.get("backend")) == "motion":
         out.append("motion 后端没有骨骼点，判定退化为人体框宽高比，且要求摄像头固定不动。")
+
+    devices = (data.get("devices") or {}).get("sources") or []
+    bands = (data.get("identity") or {}).get("bands") or []
+    if devices and not bands:
+        out.append("配了设备但没有手环绑定，事件无法归属到具体住户，"
+                   "会退回按房间识别。在「手环绑定」里登记 band_id 即可。")
+    if any(str(d.get("type")) == "synthetic_band" for d in devices):
+        out.append("已启用模拟手环：它产出的是剧本数据而非真实读数，"
+                   "仅用于验证融合与预警逻辑，上线前记得改成 http_push。")
+    if any(str(d.get("type")) == "apple_health" for d in devices):
+        out.append("Apple Watch 数据按小时批量到达（HealthKit 后台投递受系统节流），"
+                   "**不能用于急救告警**——等心率异常传到服务器可能已过去十几分钟。"
+                   "它的价值在个体基线与趋势预警，实时判定仍靠摄像头。")
+        out.append("步行稳定性（苹果自家的跌倒风险指标）需要 iPhone 随身携带走路"
+                   "才会采集，只戴手表不够。老人把手机放桌上就永远没有这项数据。")
+    if not bool((data.get("risk") or {}).get("enabled", True)):
+        out.append("风险预警已关闭，系统只能在事件发生后告警，失去预测能力。")
     return out

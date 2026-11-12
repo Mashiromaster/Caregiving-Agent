@@ -45,6 +45,9 @@ class FallVisionSensor(Sensor):
                 ) -> tuple[Any, SensorEvent | None]:
         people = self.backend.infer(frame)
         obs, verdict = self.detector.update(ts, frame, people)
+        # 把主目标挂到 ctx 上供后续插件复用（如手势识别）——姿态推理是
+        # 本流水线最贵的一步，每个插件各跑一次会让帧率成倍下降
+        ctx.person = obs.person
         self._emit_signals(ts, obs, ctx)
         if verdict is None:
             return obs, None
@@ -55,6 +58,10 @@ class FallVisionSensor(Sensor):
     def _emit_signals(self, ts: float, obs, ctx: SensorContext) -> None:
         """把逐帧观测折算成连续信号。
 
+        **信号用墙钟 ctx.now() 而不是源时钟 ts**——风险评分按墙钟判断
+        新鲜度，源时钟（合成源从 0 开始）会让读数看起来来自 1970 年而被
+        当成陈旧数据丢弃。判定逻辑仍然用 ts，两者各管各的。
+
         姿态稳定度定义为"离躺倒还有多远"：躯干角 0°（直立）记 1.0，
         到达躺倒阈值记 0.0。这样"快要倒下"在信号上表现为缓慢下滑，
         而不是等判定成立才从 1 跳到 0。
@@ -62,9 +69,10 @@ class FallVisionSensor(Sensor):
         检不出骨骼点时不发姿态信号（而不是发 0）——没有读数与读数为 0
         是两回事，混为一谈会让风险评分把"人不在画面里"当成"姿态极不稳"。
         """
+        wall = ctx.now()
         ctx.signals.emit(sig.PRESENCE, 1.0 if obs.person is not None else 0.0,
-                         ts=ts, source=self.name)
-        ctx.signals.emit(sig.MOTION_ENERGY, obs.motion, ts=ts, source=self.name)
+                         ts=wall, source=self.name)
+        ctx.signals.emit(sig.MOTION_ENERGY, obs.motion, ts=wall, source=self.name)
 
         if obs.torso_angle is not None:
             stability = 1.0 - min(obs.torso_angle / max(self._lying_angle, 1e-6), 1.0)
@@ -77,7 +85,7 @@ class FallVisionSensor(Sensor):
             quality = 0.5
         else:
             return
-        ctx.signals.emit(sig.POSTURE_STABILITY, stability, ts=ts,
+        ctx.signals.emit(sig.POSTURE_STABILITY, stability, ts=wall,
                          source=self.name, quality=quality)
 
     # ------------------------------------------------------------ 表达

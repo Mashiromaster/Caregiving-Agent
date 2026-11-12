@@ -33,6 +33,65 @@ ACCEL_MAG = "band.accel_mag"                     # g，合加速度
 WEAR_STATE = "band.worn"                         # 0/1，是否佩戴中
 GAIT_STABILITY = "band.gait_stability"           # 0~1，越低越不稳
 
+# ---- 可穿戴健康数据（Apple Watch 等）。单独用 watch.* 命名空间而不是并进
+# band.*，因为**产生节奏完全不同**：手环模拟器每 0.5 秒一条，而 Apple Watch
+# 的静息心率一天才算一次、步行稳定度要攒够步数才更新。两者混在一个名字下，
+# 新鲜度策略就没法分别设定（见下面的 MAX_AGE）。
+WATCH_HEART_RATE = "watch.heart_rate"            # bpm，区间均值
+WATCH_RESTING_HR = "watch.resting_hr"            # bpm，静息心率
+WATCH_HRV = "watch.hrv"                          # ms，SDNN
+WATCH_SPO2 = "watch.spo2"                        # %
+WATCH_RESP_RATE = "watch.respiratory_rate"       # 次/分
+WALKING_STEADINESS = "watch.walking_steadiness"  # %，苹果自家的跌倒风险指标
+WALKING_SPEED = "watch.walking_speed"            # m/s
+WALKING_ASYMMETRY = "watch.walking_asymmetry"    # %，左右步态不对称
+DOUBLE_SUPPORT = "watch.double_support"          # %，双脚同时着地占比
+STEP_COUNT = "watch.step_count"                  # 步
+ACTIVE_ENERGY = "watch.active_energy"            # kcal
+SLEEP_HOURS = "watch.sleep_hours"                # 小时
+SLEEP_AWAKENINGS = "watch.sleep_awakenings"      # 次，夜间觉醒次数
+STAND_HOURS = "watch.stand_hours"                # 小时
+
+#: 每个信号「多旧就不该再信」。**新鲜度不是一个全局常量**——摄像头 15 秒
+#: 没数据就是出问题了，而 Apple Watch 的静息心率 6 小时前的读数完全正常。
+#: 之前风险评分里把 max_age 写死成 60/120 秒（为 0.5 秒一推的模拟手环调的），
+#: 接入手表后每一条读数都会被静默丢弃：信号进了总线、评分却恒为 0 且不报错。
+#: 所以把容忍度跟着信号本身走，而不是跟着调用点走。
+HOUR = 3600.0
+MAX_AGE: dict[str, float] = {
+    POSTURE_STABILITY: 15.0,
+    MOTION_ENERGY: 15.0,
+    PRESENCE: 15.0,
+    HEART_RATE: 120.0,
+    SPO2: 300.0,
+    ACCEL_MAG: 60.0,
+    WEAR_STATE: 300.0,
+    GAIT_STABILITY: 60.0,
+    # 手表类：按小时甚至按天更新，给足容忍度
+    WATCH_HEART_RATE: 2 * HOUR,
+    WATCH_RESTING_HR: 36 * HOUR,
+    WATCH_HRV: 36 * HOUR,
+    WATCH_SPO2: 6 * HOUR,
+    WATCH_RESP_RATE: 12 * HOUR,
+    WALKING_STEADINESS: 7 * 24 * HOUR,   # 要攒够步行样本才更新，一周一次也正常
+    WALKING_SPEED: 3 * 24 * HOUR,
+    WALKING_ASYMMETRY: 3 * 24 * HOUR,
+    DOUBLE_SUPPORT: 3 * 24 * HOUR,
+    STEP_COUNT: 6 * HOUR,
+    ACTIVE_ENERGY: 12 * HOUR,
+    SLEEP_HOURS: 36 * HOUR,
+    SLEEP_AWAKENINGS: 36 * HOUR,
+    STAND_HOURS: 12 * HOUR,
+}
+
+#: 查不到时的兜底容忍度。偏保守——宁可把来路不明的信号当成陈旧的忽略掉，
+#: 也不要让一个永远不更新的读数一直参与评分（掉线后最后一次心率会停在那儿）。
+DEFAULT_MAX_AGE = 300.0
+
+
+def max_age_of(name: str) -> float:
+    return MAX_AGE.get(name, DEFAULT_MAX_AGE)
+
 
 @dataclass
 class Signal:
@@ -122,6 +181,27 @@ class SignalBus:
               max_age: float | None = None, now: float | None = None) -> float:
         sig = self.latest(name, max_age=max_age, now=now)
         return sig.value if sig is not None else default
+
+    def fresh(self, name: str, now: float | None = None) -> Signal | None:
+        """按该信号自己的节奏判断新鲜度。
+
+        风险因子一律用这个而不是自己写 max_age——否则每接一类新设备，
+        都要去翻一遍所有因子改常数，漏一个就是静默失效。
+        """
+        return self.latest(name, max_age=max_age_of(name), now=now)
+
+    def first_fresh(self, names: Iterable[str], now: float | None = None
+                    ) -> Signal | None:
+        """按优先级取第一个还新鲜的信号。
+
+        用于同一量纲的多源备份：手表的步行稳定度最准但可能几天才更新一次，
+        没有时退回手环步态，再没有才用摄像头姿态。
+        """
+        for name in names:
+            got = self.fresh(name, now=now)
+            if got is not None:
+                return got
+        return None
 
     def window_of(self, name: str, seconds: float,
                   now: float | None = None) -> list[Signal]:

@@ -85,6 +85,10 @@ DEFAULT_RULES: list[Rule] = [
          "单条件路径且住户非高危，置信度不足以直接判紧急",
          lambda ev, prof, ctx: ev.trigger != "descent+lying" and not _high_risk(prof),
          priority=8),
+    Rule("R-HELP-01", "help_gesture", "L3",
+         "住户做出求助手势并保持，为本人主动发起的呼救",
+         lambda ev, prof, ctx: True,
+         priority=10),
     Rule("R-TEST-01", "manual_test", "L2",
          "人工演练触发，不代表真实事件",
          lambda ev, prof, ctx: True,
@@ -127,12 +131,15 @@ class Grader:
         if best is None:
             # 规则无命中 → 降级为 L1 记录（技术文档的降级策略）。
             # 不能因为没写规则就把事件丢掉。
-            return Grading(level="L1", rule_id="R-DEFAULT",
-                           reason=f"无匹配规则，按提示级记录（事件类型 {event.kind}）",
-                           matched=matched)
-
-        grading = Grading(level=best.level, rule_id=best.id, reason=best.reason,
-                          matched=matched)
+            grading = Grading(
+                level="L1", rule_id="R-DEFAULT",
+                reason=f"无匹配规则，按提示级记录（事件类型 {event.kind}）",
+                matched=matched)
+        else:
+            grading = Grading(level=best.level, rule_id=best.id,
+                              reason=best.reason, matched=matched)
+        # 夜间修正对兜底 L1 同样适用——未知事件发生在夜里，
+        # 恰恰是最不该被当成"仅记录"而忽略的情形
         self._apply_night_shift(grading, context)
         return grading
 

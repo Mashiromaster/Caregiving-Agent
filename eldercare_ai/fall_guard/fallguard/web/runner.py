@@ -40,6 +40,25 @@ class Hub:
         self._log_seq = 0
         self._log_lock = threading.Lock()
         self._last_encode = 0.0
+        # 每条 MJPEG 连接占一个"席位"。浏览器切换标签页时会新建连接，
+        # 而旧连接要等 TCP 超时才断——不设上限的话连接会越积越多，
+        # 每条都在推同一份帧，画面 fps 被活活拖垮（实测 6 条连接 → 30fps 掉到 11.8）。
+        self._stream_epoch = 0
+
+    def claim_stream(self) -> int:
+        """申请一个推流席位，返回本次的 epoch。
+
+        新连接到来时 epoch 自增，老连接发现 epoch 变了就自行退出——
+        实时画面只需要最新那一条连接，旧的留着纯属浪费。
+        """
+        with self._cv:
+            self._stream_epoch += 1
+            self._cv.notify_all()
+            return self._stream_epoch
+
+    def stream_current(self, epoch: int) -> bool:
+        with self._cv:
+            return epoch == self._stream_epoch
 
     # ----------------------------------------------------------- 帧
     def publish(self, frame, obs_dict: dict[str, Any]) -> None:
@@ -131,14 +150,23 @@ class WebGuard(FallGuard):
         super().__init__(cfg, show=False, log=hub.log, force_backend=force_backend)
         self.hub = hub
 
-    def _show(self, frame, obs) -> int:
+    def show_frame(self, frame, obs) -> int:
+        """覆写渲染出口：画面推给 Hub，按键从 Hub 取。
+
+        这是 Web 层对运行时的**唯一**注入点。因为覆写的是同一个方法，
+        网页上的「取消外呼」与预览窗按 c 走的是完全相同的 handle_key 路径，
+        不存在两套语义不一致的实现。
+        """
         banner = self.active.banner if self.active else ""
         color = self.active.color if self.active else render.RED
-        img = render.draw(frame, obs, backend=self.backend.name, fps=self._fps_ema,
-                          cfg=self.cfg, banner=banner, banner_color=color,
-                          stats=self.stats.as_dict())
+        img = render.draw(frame, obs, backend=self._backend_name(),
+                          fps=self.fps_estimate, cfg=self.cfg, banner=banner,
+                          banner_color=color, stats=self.stats.as_dict())
         self.hub.publish(img, _obs_dict(obs))
         return self.hub.pop_key()
+
+    # 旧方法名仍被 pipeline 兼容壳引用
+    _show = show_frame
 
 
 class Runner:
@@ -169,6 +197,7 @@ class Runner:
                         and guard.active.thread.is_alive())
             active = {
                 "event_id": rec.event_id,
+                "event_type": rec.event_type,
                 "level": rec.level,
                 "trigger": rec.trigger,
                 "confidence": round(rec.confidence, 3),
@@ -180,26 +209,36 @@ class Runner:
                 "done": guard.active.done.is_set(),
                 "cancellable": not guard.active.done.is_set() and not handling,
                 "notes": list(rec.notes),
-                "calls": [c.to_dict() for c in (guard.active.ctx.called
-                                                if guard.active.ctx else [])],
+                "grading": dict(rec.grading),
+                "memory": (rec.memory or {}).get("summary", ""),
+                "calls": guard.active.calls,
             }
+        risk = guard.last_risk if guard else None
         return {
             "state": "running" if self.alive else self.state,
             "error": self.error,
             "options": dict(self.options),
-            "backend": guard.backend.name if guard else None,
+            # 框架通用字段
             "gateway": guard.gateway.describe() if guard else None,
             "scene": ({"place": str(guard.cfg.scene.place),
                        "resident": str(guard.cfg.scene.resident_name)}
                       if guard else None),
-            "fps": round(guard._fps_ema, 1) if guard else None,
+            "fps": round(guard.fps_estimate, 1) if guard else None,
             "stats": guard.stats.as_dict() if guard else
-                     {"frames": 0, "events": 0, "calls": 0, "cancelled": 0},
+                     {"frames": 0, "events": 0, "calls": 0, "cancelled": 0,
+                      "warnings": 0},
             "uptime": round(time.time() - self.started_at, 1) if self.started_at
                       and self.alive else None,
             "observation": self.hub.observation(),
             "active": active,
             "last_event_id": guard.last_event_id if guard else None,
+            # 插件自报，框架不解释
+            "sensors": guard.describe_sensors() if guard else [],
+            "devices": guard.describe_devices() if guard else [],
+            "identity": guard.identity.describe() if guard else [],
+            "backend": guard._backend_name() if guard else None,
+            "risk": risk.to_dict() if risk is not None else None,
+            "signals": guard.signals.snapshot() if guard else {},
         }
 
     # ----------------------------------------------------------- 启停
@@ -243,20 +282,36 @@ class Runner:
             self._thread.start()
             return {"ok": True}
 
-    def stop(self, timeout: float = 30.0) -> dict[str, Any]:
+    def stop(self, timeout: float = 2.0) -> dict[str, Any]:
+        """请求停止。**不阻塞等待收尾**。
+
+        这里曾经是 thread.join(timeout=30)，而 stop() 跑在 HTTP 请求线程里，
+        于是点一次停止就占住一个线程最长 30 秒；前端每秒轮询 /api/status，
+        这些请求全排在后面，界面直接卡死——用户越点越卡。
+
+        收尾本身可能真的要十几秒（等后置证据窗口收满、合成 mp4），
+        那是正常的，但不该让界面陪着等。所以只给一个很短的宽限，
+        没退出就直接返回，让前端靠轮询 state 自己发现何时真正停下。
+        """
         guard, thread = self.guard, self._thread
         if guard is None or thread is None or not thread.is_alive():
             self.state = "stopped" if self.guard else "idle"
             return {"ok": True, "reason": "未在运行"}
+
+        already = self.state == "stopping"
         self.state = "stopping"
-        self.hub.log("[停止] 收到停止指令，等待事件处置收尾…")
-        guard._stop = True
+        if not already:
+            # 重复点停止时不再刷日志——之前每点一次就写一行"收到停止指令"，
+            # 用户看到一串相同的日志会以为系统没反应，其实是在收尾
+            self.hub.log("[停止] 收到停止指令，等待事件处置与留证收尾…")
+        guard.request_stop()
+
         thread.join(timeout=timeout)
-        stopped = not thread.is_alive()
-        if stopped:
+        if not thread.is_alive():
             self.state = "stopped"
-        return {"ok": stopped,
-                "reason": "" if stopped else f"{timeout:.0f}s 内未退出，仍在收尾"}
+            return {"ok": True, "reason": ""}
+        return {"ok": True, "pending": True,
+                "reason": "正在收尾（等待后置证据与事件归档），完成后会自动转为已停止"}
 
     def send_key(self, key: str) -> dict[str, Any]:
         if not self.alive:
@@ -270,10 +325,19 @@ class Runner:
 
     # ----------------------------------------------------------- MJPEG
     def mjpeg(self, boundary: bytes = b"fgframe"):
-        """生成 multipart/x-mixed-replace 流。"""
+        """生成 multipart/x-mixed-replace 流。
+
+        只保留最新一条连接：切换标签页、刷新页面都会新建连接，而旧连接
+        要等 TCP 超时才断。若放任不管，每条连接都在推同一份帧，
+        实时画面会被拖垮（实测 6 条并存时 fps 从 30 掉到 11.8）。
+        """
+        epoch = self.hub.claim_stream()
         seq = -1
         idle_rounds = 0
         while True:
+            # 有新连接进来就让位——实时画面只需要最新那一条
+            if not self.hub.stream_current(epoch):
+                return
             jpeg, seq = self.hub.wait_frame(seq, timeout=2.0)
             if jpeg is None:
                 idle_rounds += 1

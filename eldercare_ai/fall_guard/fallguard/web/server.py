@@ -48,6 +48,14 @@ class App:
         cfg = self._cfg()
         return EventLog(cfg.path(cfg.get("log.dir", "data")))
 
+    def _memory(self, cfg):
+        from ..core.memory import Memory
+        from ..events import EventLog
+
+        log = EventLog(cfg.path(cfg.get("log.dir", "data")))
+        return Memory(cfg.path(cfg.get("memory.dir", "data/memory")),
+                      event_log=log)
+
     # ------------------------------------------------------------ 路由
     def get(self, path: str, query: dict[str, list[str]]) -> tuple[int, Any]:
         if path == "/api/status":
@@ -65,7 +73,10 @@ class App:
             rows, latest = self.runner.hub.logs(since)
             return 200, {"logs": rows, "latest": latest}
         if path == "/api/events":
-            return 200, self._events(_int(query.get("limit", ["50"])[0], 50))
+            return 200, self._events(_int(query.get("limit", ["50"])[0], 50),
+                                     query.get("type", [""])[0])
+        if path == "/api/residents":
+            return 200, self._residents()
         if path.startswith("/api/events/"):
             return self._event_detail(path[len("/api/events/"):])
         return 404, {"error": "未知接口"}
@@ -83,6 +94,10 @@ class App:
             return 200, self.runner.send_key(str(body.get("key") or ""))
         if path == "/api/call-test":
             return self._call_test(body)
+        if path == "/api/device/push":
+            return self._device_push(body)
+        if path == "/api/residents":
+            return self._save_resident(body)
         if path.startswith("/api/events/") and path.endswith("/label"):
             event_id = path[len("/api/events/"):-len("/label")]
             return self._label(event_id, body)
@@ -100,6 +115,10 @@ class App:
                 "resident": str(cfg.scene.resident_name),
                 "source": cfg.camera.source,
                 "backend": str(cfg.detector.backend),
+                "sensors": list(cfg.get("sensors.enabled") or ["fall_vision"]),
+                "devices": len(cfg.get("devices.sources") or []),
+                "identity": list(cfg.get("identity.providers") or []),
+                "risk_enabled": bool(cfg.get("risk.enabled", True)),
                 "provider": str(cfg.call.provider),
                 "dry_run": bool(cfg.call.dry_run),
                 "contacts": len(cfg.get("call.contacts") or []),
@@ -226,20 +245,23 @@ class App:
         return 200, {"ok": True, "describe": gw.describe(), "slots": slots,
                      "result": res.to_dict(), "params": res.params}
 
-    def _events(self, limit: int) -> dict[str, Any]:
+    def _events(self, limit: int, event_type: str = "") -> dict[str, Any]:
         try:
             log = self._event_log()
         except Exception as exc:
-            return {"events": [], "stats": None, "error": str(exc)}
-        rows = log.events(limit=max(limit, 1))
+            return {"events": [], "stats": None, "types": [], "error": str(exc)}
+        rows = log.events(limit=max(limit, 1), event_type=event_type or None)
         brief = [{
             "event_id": r.get("event_id", ""),
             "detected_at": r.get("detected_at", ""),
+            "event_type": r.get("event_type", "fall"),
             "level": r.get("level", ""),
             "trigger": r.get("trigger", ""),
             "confidence": r.get("confidence", 0),
             "room": r.get("room", ""),
             "resident": r.get("resident", ""),
+            "resident_id": r.get("resident_id", ""),
+            "rule_id": (r.get("grading") or {}).get("rule_id", ""),
             "outcome": r.get("outcome", ""),
             "cancelled": bool(r.get("cancelled")),
             "fallback_fired": bool(r.get("fallback_fired")),
@@ -250,7 +272,48 @@ class App:
             "has_clip": bool((r.get("evidence") or {}).get("clip")),
             "label": r.get("label"),
         } for r in reversed(rows)]
-        return {"events": brief, "stats": log.stats(), "error": ""}
+        return {"events": brief, "stats": log.stats(event_type=event_type or None),
+                "types": log.event_types(), "error": ""}
+
+    def _residents(self) -> dict[str, Any]:
+        """住户画像列表。画像直接影响分级（高危住户单源即升级），
+        所以要能在面板上看到和改。"""
+        try:
+            cfg = self._cfg()
+            mem = self._memory(cfg)
+        except Exception as exc:
+            return {"residents": [], "error": str(exc)}
+        out = []
+        for rid, profile in sorted(mem.profiles().items()):
+            out.append({"resident_id": rid, "profile": profile,
+                        "history": mem.history(rid),
+                        "summary": mem.summarize(rid, profile, mem.history(rid))})
+        return {"residents": out, "error": ""}
+
+    def _save_resident(self, body: dict[str, Any]) -> tuple[int, Any]:
+        rid = str(body.get("resident_id") or "").strip()
+        if not rid:
+            return 400, {"ok": False, "reason": "resident_id 不能为空"}
+        fields: dict[str, Any] = {}
+        for key in ("name", "room"):
+            if key in body:
+                fields[key] = str(body[key])
+        for key in ("high_fall_risk", "dementia", "anticoagulant"):
+            if key in body:
+                fields[key] = bool(body[key])
+        for key in ("fall_history", "hr_baseline"):
+            if key in body:
+                try:
+                    fields[key] = float(body[key])
+                except (TypeError, ValueError):
+                    return 400, {"ok": False, "reason": f"{key} 不是数字"}
+        try:
+            mem = self._memory(self._cfg())
+            profile = mem.upsert_profile(rid, **fields)
+        except Exception as exc:
+            return 400, {"ok": False, "reason": str(exc)}
+        self.runner.hub.log(f"[画像] 已更新住户 {rid}")
+        return 200, {"ok": True, "profile": profile}
 
     def _event_detail(self, rest: str) -> tuple[int, Any]:
         # 路径段来自 URL，必须解码：关键帧文件名形如 keyframe_t+0.0s.jpg，
@@ -285,15 +348,41 @@ class App:
         if not EVENT_ID_RE.match(event_id):
             return 400, {"ok": False, "reason": "事件号不合法"}
         is_false = bool(body.get("is_false_alarm", True))
-        payload = self._event_log().label(
-            event_id, is_false, str(body.get("reason") or ""), by="web")
-        self.runner.hub.log(
-            f"[标注] {event_id} → {'误报' if is_false else '真实事件'}")
-        # 标注为误报通常是为了立刻复测，顺手解除静默期
+        reason = str(body.get("reason") or "")
         guard = self.runner.guard
+
+        # 运行中走 runtime：它会把标注转给对应插件（解除静默期等）。
+        # 未运行时只写日志——没有插件实例可通知。
         if is_false and guard is not None and self.runner.alive:
-            guard.detector.reset_cooldown()
+            payload = guard.mark_false_alarm(event_id, reason, by="web")
+        else:
+            payload = self._event_log().label(event_id, is_false, reason, by="web")
+            self.runner.hub.log(
+                f"[标注] {event_id} → {'误报' if is_false else '真实事件'}")
         return 200, {"ok": True, "label": payload}
+
+    def _device_push(self, body: dict[str, Any]) -> tuple[int, Any]:
+        """接收外部设备（手环等）推送的读数。
+
+        真实设备的接入点：厂商网关 POST 到这里即可，不需要为每个品牌
+        写 SDK 适配。设备必须已在配置里登记且系统正在运行——信号要有
+        SignalBus 可落，而总线归运行时所有。
+        """
+        guard = self.runner.guard
+        if guard is None or not self.runner.alive:
+            return 409, {"ok": False,
+                         "reason": "系统未在运行，无法接收设备数据。请先启动监测。"}
+        device_id = str(body.get("device_id") or "")
+        device = guard.device_by_id(device_id) if device_id else None
+        if device is None:
+            device = next((d for d in guard.devices if hasattr(d, "ingest")), None)
+        if device is None or not hasattr(device, "ingest"):
+            return 400, {"ok": False,
+                         "reason": "没有可接收推送的设备。请在「配置 → 设备」里"
+                                   "添加一个 type=http_push 的设备。",
+                         "known": [d.describe().get("device_id")
+                                   for d in guard.devices]}
+        return 200, device.ingest(body)
 
 
 # --------------------------------------------------------------------- HTTP

@@ -125,6 +125,17 @@ def _call(cfg) -> list[dict[str, Any]]:
                      "演练（dry_run=true），只打印参数不拨号" if dry
                      else "真实拨号，判定成立会产生费用",
                      "联调通过后在「配置 → 外呼」里关闭演练模式" if dry else ""))
+
+    if gw.provider_name == "spug":
+        # 配置全齐、体检全绿，真实拨号仍可能 403——Spug 按公网 IP 鉴权，
+        # 而家用宽带的 IP 会变。这是静态检查发现不了的失败模式，
+        # 只能靠提示让人记住去确认。
+        out.append(_item(
+            "IP 白名单", "warn",
+            "Spug 按调用方公网 IP 鉴权，不在白名单会返回 403",
+            "在 push.spug.cc 的「个人设置 → IP 白名单」里加入本机公网 IP。"
+            "家用宽带 IP 会变动，换网络或重拨光猫后需要重新添加——"
+            "届时配置看起来完全正常，但电话打不出去"))
     return out
 
 
@@ -160,6 +171,105 @@ def _thresholds(cfg) -> list[dict[str, Any]]:
     ]
 
 
+def _sensors(cfg) -> list[dict[str, Any]]:
+    """感知插件自报状态。新增插件会自动出现在这里，不用改体检代码。"""
+    from ..core import sensors as sensors_mod
+
+    out: list[dict[str, Any]] = []
+    enabled = list(cfg.get("sensors.enabled") or ["fall_vision"])
+    have = sensors_mod.available()
+    if not enabled:
+        return [_item("感知插件", "fail", "未启用任何插件",
+                      "系统不会产生任何事件。在「配置 → 感知插件」里至少启用一个")]
+    for name in enabled:
+        if not have.get(name):
+            out.append(_item(f"插件 {name}", "fail", "依赖不满足或插件不存在",
+                             "检查插件名拼写，或安装缺失依赖"))
+            continue
+        # 真正实例化一次：配置错误（如后端不可用）只有这时才暴露
+        try:
+            sensor = sensors_mod.create(name, cfg, int(cfg.camera.fps))
+            desc = sensor.describe()
+            sensor.close()
+            detail = desc.get("detail", "")
+            extra = f"　后端 {desc['backend']}" if desc.get("backend") else ""
+            out.append(_item(f"插件 {name}", "ok", f"{detail}{extra}"))
+        except Exception as exc:
+            out.append(_item(f"插件 {name}", "fail", f"初始化失败：{exc}",
+                             "检查该插件对应的配置项"))
+    return out
+
+
+def _identity(cfg) -> list[dict[str, Any]]:
+    from ..core import identity as identity_mod
+
+    out: list[dict[str, Any]] = []
+    resolver = identity_mod.create_enabled(cfg)
+    if not resolver.providers:
+        return [_item("身份识别", "warn", "没有可用的识别器",
+                      "事件将无法归属到住户，记忆与个体化分级都不会生效")]
+    names = " → ".join(p.name for p in resolver.providers)
+    out.append(_item("识别顺序", "ok", names,
+                     "按此顺序尝试，先返回结果者胜出；认不出人不会阻断处置"))
+
+    rooms = len(cfg.get("identity.rooms") or [])
+    bands = len(cfg.get("identity.bands") or [])
+    out.append(_item("绑定关系", "ok" if (rooms or bands) else "warn",
+                     f"{rooms} 条房间绑定，{bands} 条手环绑定",
+                     "" if (rooms or bands)
+                     else "未登记绑定关系，会退回使用「场景」里配的住户，"
+                          "多住户场景下记忆会混在一起"))
+
+    if not identity_mod.available().get("face"):
+        out.append(_item("人脸识别", "skip", "接口预留，未实现",
+                         "原因见 fallguard/identity/face.py："
+                         "夜间与倒地侧脸识别率不足，且人脸底库属敏感生物特征"))
+    return out
+
+
+def _devices(cfg) -> list[dict[str, Any]]:
+    from .. import devices as devices_mod
+
+    entries = list(cfg.get("devices.sources") or [])
+    if not entries:
+        return [_item("外部设备", "warn", "未接入任何设备（纯视觉模式）",
+                      "接入手环可提供心率与步态信号，让风险预警在跌倒前就能发出。"
+                      "没有实物时可先配 type=synthetic_band 的模拟手环验证链路")]
+    out: list[dict[str, Any]] = []
+    have = devices_mod.available()
+    for entry in entries:
+        dtype = str(entry.get("type") or "")
+        did = str(entry.get("device_id") or dtype)
+        if not entry.get("enabled", True):
+            out.append(_item(f"设备 {did}", "skip", f"{dtype}（已禁用）"))
+            continue
+        if not have.get(dtype):
+            out.append(_item(f"设备 {did}", "fail", f"未知设备类型 {dtype!r}",
+                             f"可选：{', '.join(sorted(have))}"))
+            continue
+        note = "模拟数据，仅用于验证逻辑，上线前须换成 http_push" \
+            if dtype == "synthetic_band" else "等待厂商网关 POST /api/device/push"
+        out.append(_item(f"设备 {did}", "ok", f"{dtype} — {note}"))
+    return out
+
+
+def _risk(cfg) -> list[dict[str, Any]]:
+    enabled = bool(cfg.get("risk.enabled", True))
+    if not enabled:
+        return [_item("风险预警", "warn", "已关闭",
+                      "关闭后系统只能在事件发生后告警，失去预测能力")]
+    warn = float(cfg.get("risk.warn_score", 45.0))
+    elev = float(cfg.get("risk.elevated_score", 70.0))
+    out = [_item("风险预警", "ok", f"关注 ≥{warn:g} 分　偏高 ≥{elev:g} 分",
+                 "预警走不打扰路径：只记录与提示，绝不外呼。"
+                 "跌倒告警不受它影响，反之亦然")]
+    if not list(cfg.get("devices.sources") or []):
+        out.append(_item("预警信号源", "warn", "只有摄像头的姿态稳定度",
+                         "心率、步态等信号需要手环。纯视觉下预警能力有限，"
+                         "因为姿态异常往往与跌倒几乎同时发生"))
+    return out
+
+
 def report(config_path: str | None = None, *, running: bool = False) -> dict[str, Any]:
     groups: list[dict[str, Any]] = []
     src = cfgmod.config_source(config_path)
@@ -178,6 +288,10 @@ def report(config_path: str | None = None, *, running: bool = False) -> dict[str
         return _summarize(groups)
 
     groups.append({"title": "视频源", "items": _camera(cfg, running)})
+    groups.append({"title": "感知插件", "items": _sensors(cfg)})
+    groups.append({"title": "外部设备", "items": _devices(cfg)})
+    groups.append({"title": "身份识别", "items": _identity(cfg)})
+    groups.append({"title": "风险预警", "items": _risk(cfg)})
     groups.append({"title": "外呼", "items": _call(cfg)})
     groups.append({"title": "智能体", "items": _agent(cfg)})
     groups.append({"title": "判定", "items": _thresholds(cfg)})

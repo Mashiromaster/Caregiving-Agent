@@ -20,8 +20,10 @@ from typing import Any
 
 from .events import SensorEvent
 
-# 按"先专用后兜底"排序，与 pose/__init__.py 的 ORDER 同一思路
-ORDER = ("fall_vision",)
+# 按"先专用后兜底"排序，与 pose/__init__.py 的 ORDER 同一思路。
+# fall_vision 必须排在 help_gesture 前面——它负责跑姿态推理并把结果
+# 挂到 ctx.person 上，手势插件直接复用，不重复推理。
+ORDER = ("fall_vision", "help_gesture")
 
 
 class Sensor:
@@ -79,12 +81,36 @@ class SensorContext:
 
     插件通过它拿到信号总线与场景信息，但拿不到外呼网关、事件日志、
     文件系统——感知层不应该有能力直接打电话，那是处置层的职责。
+
+    **两个时钟**，这是容易出错的地方：
+      ts（传给 observe 的参数）  源时钟。视频文件与合成源从 0 开始计，
+                                 判定逻辑与留证检索都用它。
+      now()                      墙钟。连续信号必须用它打时间戳。
+
+    为什么信号要用墙钟：风险评分、Web 面板、设备线程全都在墙钟上工作。
+    合成源 296 帧只花 0.03 秒墙钟就跑完，若信号带的是源时钟（0~19.7），
+    评分器按墙钟判断新鲜度时会认为这些读数来自 1970 年而全部丢弃——
+    摄像头信号就此永远不参与评分。
     """
 
     def __init__(self, signals, scene: dict[str, str], log=print):
         self.signals = signals
         self.scene = dict(scene)
         self.log = log
+        self._wall = 0.0
+        #: 本帧的主目标（Person）。由产出骨骼点的插件填写，后续插件复用——
+        #: 否则每个需要骨骼点的插件都要自己跑一次姿态推理，帧率会成倍下降。
+        self.person: Any = None
+
+    def tick(self, wall: float) -> None:
+        """由 runtime 每帧更新，避免每个插件各自调 time.time()。"""
+        self._wall = wall
+        self.person = None
+
+    def now(self) -> float:
+        import time
+
+        return self._wall or time.time()
 
 
 def available() -> dict[str, bool]:
@@ -92,14 +118,16 @@ def available() -> dict[str, bool]:
     import importlib.util
 
     has_cv2 = importlib.util.find_spec("cv2") is not None
-    return {"fall_vision": has_cv2}
+    return {"fall_vision": has_cv2, "help_gesture": has_cv2}
 
 
 def create(name: str, cfg, fps: int, **kwargs: Any) -> Sensor:
     """按名称创建插件。"""
     from ..sensors.fall_vision import FallVisionSensor
+    from ..sensors.help_gesture import HelpGestureSensor
 
-    builders = {"fall_vision": FallVisionSensor}
+    builders = {"fall_vision": FallVisionSensor,
+                "help_gesture": HelpGestureSensor}
     name = (name or "").lower()
     if name not in builders:
         raise ValueError(
@@ -114,6 +142,14 @@ def create_enabled(cfg, fps: int, **kwargs: Any) -> list[Sensor]:
     不能因为引入了插件机制就让原本在跑的检测悄悄停掉。
     """
     names = list(cfg.get("sensors.enabled") or ORDER)
+    # help_gesture 复用 fall_vision 挂在 ctx 上的骨骼点，单独启用会永远
+    # 检不到人——与其静默失效，不如在日志里说清楚
+    if "help_gesture" in names and "fall_vision" not in names:
+        raise RuntimeError(
+            "help_gesture 依赖 fall_vision 提供骨骼点（它不自己跑姿态推理），"
+            "请在 sensors.enabled 里同时启用 fall_vision")
+    # 顺序很重要：产出骨骼点的插件必须先跑
+    names.sort(key=lambda n: ORDER.index(n) if n in ORDER else len(ORDER))
     have = available()
     out: list[Sensor] = []
     errors: list[str] = []

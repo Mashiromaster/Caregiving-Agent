@@ -91,3 +91,22 @@ voice_sdk_app_id = ""
 template_id = ""
 # TemplateParamSet 按顺序填充，与下列键一致
 template_param_keys = ["name", "time", "place"]
+
+[call.volc]
+# 火山引擎语音服务 VMS · SingleBatchAppend
+access_key_id = "env:VOLC_ACCESS_KEY"
+secret_access_key = "env:VOLC_SECRET_KEY"
+region = "cn-north-1"
+number_pool_no = ""           # 控制台「号码管理」里的号码池编号
+tts_resource_key = ""         # 审核通过的 TTS 模板 ResourceKey（不是模板名）
+# 注意变量是 #name# 格式而非 ${name}，且变量名不能含中文
+# 模板文本示例：#name#于#time#在#place#检测到跌倒，请立即前往
+tts_param_keys = ["name", "time", "place"]
+
+[call.spug]
+# Spug 推送助手 —— 个人账号可用，无需企业资质
+# push.spug.cc 微信扫码登录 → 创建语音模板 → 复制模板编码
+template_id = ""              # 填它可用 targets 动态指定被叫，一个模板服务整条升级链
+user_id = ""                  # 不建模板时的简易方式，接收人在 Spug 后台绑定
+param_keys = ["name", "time", "place"]
+channel = "voice"             # 仅 user_id 方式生效，可组合如 "voice|sms"

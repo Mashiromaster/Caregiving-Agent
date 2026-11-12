@@ -13,6 +13,7 @@ const S = {
   warnings: [],
   dirty: false,
   events: null,
+  eventType: '',
   eventDetail: null,
   doctor: null,
   doctorLoading: false,
@@ -72,9 +73,21 @@ const fmtDur = (s) => {
 
 const shortTime = (iso) => (iso || '').replace('T', ' ').slice(0, 19);
 
+// 事件类型 → 中文。插件产出的 kind 是代码标识，值班台看不懂
+const TYPE_LABEL = {
+  fall: '跌倒',
+  risk_warning: '风险预警',
+  manual_test: '人工演练',
+};
+const typeName = (t) => TYPE_LABEL[t] || t || '未知';
+
 // 时间线的 stage 是代码内部名，值班台看不懂，这里翻一层
 const STAGE_LABEL = {
   detected: '判定成立',
+  identified: '身份识别',
+  graded: '规则分级',
+  escalated: '等级提升',
+  risk_assessed: '风险评估',
   evidence_captured: '留证完成',
   local_alert: '本地告警（响铃 + 播报）',
   cancelled_by_operator: '人工取消',
@@ -171,8 +184,14 @@ function renderOverview(root) {
       cfg ? el('dl', { class: 'kv' }, [
         el('dt', { text: '场景' }), el('dd', { text: `${cfg.place} · ${cfg.resident}` }),
         el('dt', { text: '视频源' }), el('dd', { text: String(cfg.source) }),
+        el('dt', { text: '感知插件' }),
+        el('dd', { text: (cfg.sensors || []).join(' / ') || '无' }),
         el('dt', { text: '姿态后端' }),
         el('dd', { text: st.backend ? `${cfg.backend}（实际 ${st.backend}）` : cfg.backend }),
+        el('dt', { text: '外部设备' }),
+        el('dd', { text: cfg.devices ? `${cfg.devices} 个` : '未接入（纯视觉）' }),
+        el('dt', { text: '身份识别' }),
+        el('dd', { text: (cfg.identity || []).join(' → ') || '无' }),
         el('dt', { text: '外呼' }),
         el('dd', { text: st.gateway || `${cfg.provider} / ${cfg.dry_run ? '演练' : '真实拨号'} / ${cfg.contacts} 位联系人` }),
         el('dt', { text: '取消窗口' }), el('dd', { text: `${cfg.cancel_seconds} 秒` }),
@@ -183,20 +202,64 @@ function renderOverview(root) {
       el('h2', { text: '就绪状态' }),
       el('p', { class: 'card-desc', text: '判定成立后会依次走这条链路，任一环节缺配置都会在下面列出。' }),
       el('div', { class: 'chain' }, [
-        el('span', { class: 'step', text: '判定' }), el('span', { class: 'arrow', text: '→' }),
+        el('span', { class: 'step', text: '感知插件' }), el('span', { class: 'arrow', text: '→' }),
+        el('span', { class: 'step', text: '身份' }), el('span', { class: 'arrow', text: '→' }),
+        el('span', { class: 'step', text: '记忆' }), el('span', { class: 'arrow', text: '→' }),
+        el('span', { class: 'step', text: '规则分级' }), el('span', { class: 'arrow', text: '→' }),
         el('span', { class: 'step', text: '留证' }), el('span', { class: 'arrow', text: '→' }),
-        el('span', { class: 'step', text: '本地告警' }), el('span', { class: 'arrow', text: '→' }),
-        el('span', { class: 'step', text: `取消窗口 ${cfg ? cfg.cancel_seconds : '?'}s` }),
+        el('span', { class: 'step', text: `取消窗 ${cfg ? cfg.cancel_seconds : '?'}s` }),
         el('span', { class: 'arrow', text: '→' }),
-        el('span', { class: 'step', text: '智能体处置' }), el('span', { class: 'arrow', text: '→' }),
+        el('span', { class: 'step', text: '智能体' }), el('span', { class: 'arrow', text: '→' }),
         el('span', { class: 'step', text: '外呼' }),
       ]),
+      el('p', { class: 'card-desc', style: 'margin:10px 0 0',
+        text: '风险预警是与之并行的独立通路：只记录与提示，不外呼。' }),
       el('div', { style: 'margin-top:14px' },
          blockers.map(([kind, text]) => notice(kind, text))),
     ]),
   ]));
 
+  if (st.risk || (st.devices || []).length) root.appendChild(riskCard(st));
   if (st.active) root.appendChild(activeCard(st.active));
+}
+
+function riskCard(st) {
+  const risk = st.risk;
+  const devices = st.devices || [];
+  const levelMap = { normal: ['pill-ok', '风险可控'], warn: ['pill-warn', '需要关注'],
+                     elevated: ['pill-bad', '风险偏高'] };
+  const [cls, label] = risk ? (levelMap[risk.level] || ['pill-idle', risk.level])
+                            : ['pill-idle', '未评估'];
+  return el('div', { class: 'card' }, [
+    el('div', { style: 'display:flex;gap:10px;align-items:center' }, [
+      el('h2', { text: '风险预警', style: 'margin:0' }),
+      el('span', { class: `pill ${cls}`, text: label }),
+      risk ? el('span', { class: 'card-desc', style: 'margin:0',
+                          text: `${risk.score} 分` }) : null,
+    ]),
+    el('p', { class: 'card-desc', style: 'margin:8px 0 12px',
+      text: '汇总步态、心率等连续信号预测风险。越阈只记录与提示，**不会外呼**——'
+            + '它与跌倒告警是两条独立通路，互不影响。' }),
+    risk && risk.factors.length
+      ? el('table', {}, [
+          el('thead', {}, el('tr', {}, ['因子', '得分', '依据']
+            .map((h) => el('th', { text: h })))),
+          el('tbody', {}, risk.factors.map((f) => el('tr', {}, [
+            el('td', { text: f.label }),
+            el('td', { class: 'num', text: String(f.points) }),
+            el('td', { class: 'card-desc', style: 'margin:0', text: f.reason }),
+          ]))),
+        ])
+      : el('div', { class: 'empty', text: risk ? '各项信号正常。' : '运行后显示风险评分' }),
+    devices.length ? el('div', { style: 'margin-top:14px' }, [
+      el('h2', { text: '设备', style: 'margin-bottom:8px' }),
+      el('div', { class: 'feat' }, devices.map((d) => el('div', {}, [
+        el('div', { class: 'k', text: `${d.name}${d.simulated ? '（模拟）' : ''}` }),
+        el('div', { class: `v ${d.online ? '' : 'hot'}`,
+                    text: d.online ? '在线' : '离线' }),
+      ]))),
+    ]) : null,
+  ]);
 }
 
 function stat(k, v, s) {
@@ -318,7 +381,11 @@ function renderLive(root) {
     el('div', {}, [
       el('div', { class: 'card' }, [
         el('h2', { text: '判定特征' }),
-        featurePanel(st.observation || {}, S.status && S.status.config),
+        // 固定容器：逐帧读数由轮询增量替换它的内容。容器必须一直在，
+        // 不能靠查找内部的 .feat——刚启动时面板里是"运行后显示读数"的
+        // 占位符，没有 .feat 可查，面板会永远停在占位符上。
+        el('div', { id: 'feat-panel' },
+           featurePanel(st.observation || {}, S.status && S.status.config)),
       ]),
       el('div', { class: 'card' }, [
         el('h2', { text: '运行日志' }),
@@ -401,7 +468,8 @@ async function sendKey(key) {
 
 /* ------------------------------------------------------------------ 事件 */
 async function loadEvents() {
-  const res = await api('/api/events?limit=200');
+  const q = S.eventType ? `&type=${encodeURIComponent(S.eventType)}` : '';
+  const res = await api(`/api/events?limit=200${q}`);
   S.events = res.body;
   if (S.tab === 'events') render();
 }
@@ -409,10 +477,13 @@ async function loadEvents() {
 function renderEvents(root) {
   if (!S.events) { root.appendChild(el('div', { class: 'loading', text: '加载中…' })); return; }
   const { events, stats } = S.events;
+  const types = S.events.types || [];
 
   if (stats) {
+    const byType = Object.entries(stats.by_type || {})
+      .map(([k, v]) => `${typeName(k)} ${v}`).join('　');
     root.appendChild(el('div', { class: 'stat-row' }, [
-      stat('累计事件', stats.total, ''),
+      stat('累计事件', stats.total, byType),
       stat('已外呼', stats.called, ''),
       stat('人工取消', stats.cancelled, ''),
       stat('标注误报', stats.labelled_false_alarm, `${stats.unlabelled} 起未标注`),
@@ -420,18 +491,30 @@ function renderEvents(root) {
   }
 
   const card = el('div', { class: 'card' }, [
-    el('h2', { text: '事件记录' }),
+    el('div', { style: 'display:flex;justify-content:space-between;align-items:center' }, [
+      el('h2', { text: '事件记录', style: 'margin:0' }),
+      // 预警与告警混在一张表里，筛选是区分它们的主要手段
+      types.length > 1 ? el('select', {
+        style: 'width:auto;min-width:140px',
+        onchange: (e) => { S.eventType = e.target.value; S.eventDetail = null; loadEvents(); },
+      }, [el('option', { value: '', text: '全部类型',
+                         selected: !S.eventType })].concat(
+        types.map((t) => el('option', {
+          value: t, text: typeName(t), selected: S.eventType === t })))) : null,
+    ]),
     el('p', { class: 'card-desc',
-      text: '标注写入独立的 labels.jsonl，events.jsonl 只追加不修改——原始记录始终可审计。' }),
+      text: '标注写入独立的 labels.jsonl，events.jsonl 只追加不修改——原始记录始终可审计。'
+            + '风险预警也在这里留痕（结果为「仅记录」），便于事后复盘阈值是否合适。' }),
   ]);
 
   if (!events.length) {
     card.appendChild(el('div', { class: 'empty',
-      text: '暂无事件。可在「实时监控」页点「手动触发一次演练」走一遍完整链路。' }));
+      text: S.eventType ? `没有「${typeName(S.eventType)}」类型的事件。`
+        : '暂无事件。可在「实时监控」页点「手动触发一次演练」走一遍完整链路。' }));
   } else {
     card.appendChild(el('table', {}, [
-      el('thead', {}, el('tr', {}, ['事件号', '时间', '等级', '触发路径', '置信度',
-        '结果', '外呼', '标注', ''].map((h) => el('th', { text: h })))),
+      el('thead', {}, el('tr', {}, ['事件号', '时间', '类型', '等级', '规则',
+        '触发路径', '置信度', '结果', '外呼', '标注', ''].map((h) => el('th', { text: h })))),
       el('tbody', {}, events.map((e) => eventRow(e))),
     ]));
   }
@@ -444,7 +527,7 @@ function outcomePill(e) {
   const map = {
     called: ['pill-ok', '已外呼'], cancelled: ['pill-info', '人工取消'],
     suppressed: ['pill-info', '时段抑制'], no_call: ['pill-bad', '未外呼'],
-    open: ['pill-warn', '处置中'],
+    logged: ['pill-info', '仅记录'], open: ['pill-warn', '处置中'],
   };
   const [cls, text] = map[e.outcome] || ['pill-idle', e.outcome || '—'];
   return el('span', { class: `pill ${cls}`, text });
@@ -452,12 +535,17 @@ function outcomePill(e) {
 
 function eventRow(e) {
   const label = e.label;
+  const isWarning = e.event_type === 'risk_warning';
   return el('tr', {}, [
     el('td', { class: 'mono', text: e.event_id }),
     el('td', { class: 'mono', text: shortTime(e.detected_at) }),
     el('td', {}, el('span', {
+      class: `pill ${isWarning ? 'pill-info' : 'pill-idle'}`,
+      text: typeName(e.event_type) })),
+    el('td', {}, el('span', {
       class: `pill ${e.level === 'L3' || e.level === 'L4' ? 'pill-bad' : 'pill-warn'}`,
       text: e.level })),
+    el('td', { class: 'mono', text: e.rule_id || '—' }),
     el('td', { text: e.trigger }),
     el('td', { class: 'num', text: String(e.confidence) }),
     el('td', {}, outcomePill(e)),
@@ -505,6 +593,9 @@ function eventDetailCard(ev) {
   const shots = (evd.keyframes || []).slice().sort();
   const agent = ev.agent || {};
   const calls = agent.called || [];
+  const grading = ev.grading || {};
+  const ident = grading.identity || {};
+  const mem = ev.memory || {};
 
   return el('div', { class: 'card', id: 'event-detail' }, [
     el('div', { style: 'display:flex;justify-content:space-between;align-items:center' }, [
@@ -514,9 +605,21 @@ function eventDetailCard(ev) {
     ]),
     el('dl', { class: 'kv', style: 'margin:12px 0 16px' }, [
       el('dt', { text: '时间' }), el('dd', { text: shortTime(ev.detected_at) }),
+      el('dt', { text: '类型' }), el('dd', { text: typeName(ev.event_type) }),
       el('dt', { text: '地点' }), el('dd', { text: `${ev.room} · ${ev.resident}` }),
+      ident.method ? el('dt', { text: '身份' }) : null,
+      ident.method ? el('dd', {
+        text: `${ident.resident_id || '未识别'}（${ident.detail || ident.method}`
+              + `${ident.confidence ? `，置信度 ${ident.confidence}` : ''}）` }) : null,
       el('dt', { text: '判定' }),
-      el('dd', { text: `${ev.level} · ${ev.trigger} · 置信度 ${ev.confidence}` }),
+      el('dd', { text: `${ev.trigger} · 置信度 ${ev.confidence}` }),
+      // 分级理由是"为什么当时打了这个电话"的答案，必须显著
+      el('dt', { text: '分级' }),
+      el('dd', { text: `${ev.level} — 规则 ${grading.rule_id || '?'}：`
+                       + `${grading.reason || ''}`
+                       + (grading.escalated_by ? `（${grading.escalated_by}）` : '') }),
+      mem.summary ? el('dt', { text: '住户记忆' }) : null,
+      mem.summary ? el('dd', { text: mem.summary }) : null,
       el('dt', { text: '处置' }),
       el('dd', { text: `${ev.outcome}${agent.mode ? ` · ${agent.mode}` : ''}` +
                        `${ev.fallback_fired ? ' · 确定性兜底已触发' : ''}` }),
@@ -525,6 +628,28 @@ function eventDetailCard(ev) {
       agent.error ? el('dt', { text: '异常' }) : null,
       agent.error ? el('dd', { text: agent.error }) : null,
     ]),
+
+    (grading.matched || []).length > 1 ? el('div', { style: 'margin-bottom:16px' }, [
+      el('h2', { text: '命中的全部规则', style: 'margin-bottom:8px' }),
+      el('p', { class: 'card-desc', style: 'margin:0 0 8px',
+        text: '同一事件命中多条时取最高等级。全部列出以便回放决策链。' }),
+      el('table', {}, [
+        el('thead', {}, el('tr', {}, ['规则', '等级', '理由']
+          .map((h) => el('th', { text: h })))),
+        el('tbody', {}, grading.matched.map((m) => el('tr', {}, [
+          el('td', { class: 'mono', text: m.rule_id }),
+          el('td', { text: m.level }),
+          el('td', { text: m.reason }),
+        ]))),
+      ]),
+    ]) : null,
+
+    grading.risk_at_detection ? el('div', { style: 'margin-bottom:16px' }, [
+      el('h2', { text: '判定时的风险分', style: 'margin-bottom:8px' }),
+      notice('info', `${grading.risk_at_detection.score} 分（`
+        + `${grading.risk_at_detection.level}）　`
+        + grading.risk_at_detection.summary),
+    ]) : null,
 
     shots.length ? el('h2', { text: '关键帧', style: 'margin-bottom:10px' }) : null,
     shots.length ? el('div', { class: 'shots' }, shots.map((name) => el('figure', {}, [
@@ -1086,11 +1211,13 @@ async function refreshStatus() {
            || prev.active.event_id !== st.active.event_id
            || (prev.active.calls || []).length !== (st.active.calls || []).length));
     if (needRepaint) { render(); return; }
-    // 只更新特征面板，不重建整页——重建会让 MJPEG 连接断开重连，画面闪
-    const panel = $('.card .feat');
-    if (running && panel && panel.parentElement) {
-      const holder = panel.parentElement.parentElement;
-      holder.replaceChild(featurePanel(st.observation || {}, st.config), panel.parentElement);
+    // 只更新特征面板，不重建整页——重建会让 MJPEG 连接断开重连，画面闪。
+    // 认准固定容器而不是内部的 .feat：启动瞬间 observation 还是空的，
+    // 面板里只有占位符、没有 .feat，按 .feat 查会一直查不到，
+    // 于是读数永远停在"运行后这里显示逐帧判定读数"（实测踩过）。
+    const holder = $('#feat-panel');
+    if (running && holder) {
+      holder.replaceChildren(featurePanel(st.observation || {}, st.config));
     }
   }
   if (S.tab === 'overview') render();
@@ -1101,7 +1228,10 @@ async function refreshStatus() {
 async function refreshEventsIfStale() {
   if (S.tab !== 'events' || S.eventDetail) return;
   const before = S.events ? S.events.stats && S.events.stats.total : null;
-  const res = await api('/api/events?limit=200');
+  // 必须带上当前筛选条件，否则后台轮询会用全量结果覆盖掉用户选的类型，
+  // 表现为"筛选几秒后自己变回全部"
+  const q = S.eventType ? `&type=${encodeURIComponent(S.eventType)}` : '';
+  const res = await api(`/api/events?limit=200${q}`);
   if (!res.ok) return;
   const after = res.body.stats ? res.body.stats.total : null;
   S.events = res.body;
@@ -1130,6 +1260,21 @@ function init() {
   }
   $('#btn-start').addEventListener('click', startRun);
   $('#btn-stop').addEventListener('click', stopRun);
+
+  // 切到后台标签页时断开 MJPEG。浏览器在后台仍会持有连接并接收帧，
+  // 而服务端每条连接都要推同一份数据——切几次窗口就会堆起好几条，
+  // 把实时画面的 fps 拖垮。回到前台时重新渲染会自动重连。
+  document.addEventListener('visibilitychange', () => {
+    const img = $('#stream');
+    if (!img) return;
+    if (document.hidden) {
+      img.dataset.paused = '1';
+      img.removeAttribute('src');          // 断开连接，服务端随即释放席位
+    } else if (img.dataset.paused) {
+      delete img.dataset.paused;
+      img.src = `/api/stream.mjpg?t=${Date.now()}`;
+    }
+  });
 
   window.addEventListener('beforeunload', (e) => {
     if (S.dirty) { e.preventDefault(); e.returnValue = ''; }

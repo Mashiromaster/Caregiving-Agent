@@ -20,6 +20,10 @@ BUFFER_WIDTH = 640
 class CameraSource:
     """摄像头或视频文件。macOS 下优先使用 AVFoundation 后端。"""
 
+    #: 摄像头连续读失败多少次才认定断流。单次失败是常态（切换分辨率、
+    #: USB 抖动、系统抢占），按一次失败就退出会让监控莫名其妙停掉。
+    MAX_READ_MISS = 30
+
     def __init__(self, source, width: int, height: int, fps: int, flip: bool = False):
         self.flip = flip
         self.is_file = isinstance(source, str) and not str(source).isdigit()
@@ -38,14 +42,22 @@ class CameraSource:
         self.cap = None
         for backend in backends:
             cap = cv2.VideoCapture(index_or_path, backend)
-            if cap.isOpened():
+            # isOpened() 为 true 不代表真能取到帧——macOS 上用过「连续互通
+            # 相机」（iPhone）后，设备句柄会处于"打开成功但永远读不到帧"
+            # 的状态。必须实际试读一次，否则主循环会把它当成空视频，
+            # 启动 1 秒就报"视频源结束"，日志里 frames=0。
+            if cap.isOpened() and self._probe(cap, self.is_file):
                 self.cap = cap
                 break
             cap.release()
         if self.cap is None:
             raise RuntimeError(
-                f"无法打开视频源 {source!r}。"
-                "若为摄像头，请在 系统设置 → 隐私与安全性 → 摄像头 中授权当前终端。"
+                f"无法从视频源 {source!r} 读取画面。常见原因：\n"
+                "  · macOS 未授权：系统设置 → 隐私与安全性 → 摄像头，勾选运行本程序的终端\n"
+                "  · 设备被占用：会议软件、另一个 FallGuard 实例，或刚断开的"
+                "「连续互通相机」（iPhone）仍占着句柄——拔掉手机或重新插拔后重试\n"
+                "  · 索引不对：内置摄像头通常是 0，外接设备可能是 1/2\n"
+                "无摄像头时可用 source=demo 做合成自检。"
             )
 
         if not self.is_file:
@@ -55,11 +67,38 @@ class CameraSource:
         self.declared_fps = self.cap.get(cv2.CAP_PROP_FPS) or fps
         self._file_t = 0.0
         self._file_dt = 1.0 / max(self.declared_fps, 1.0)
+        self._miss = 0
+
+    @staticmethod
+    def _probe(cap, is_file: bool, attempts: int = 10) -> bool:
+        """试读几帧确认设备真的在出画面。
+
+        文件源不做探测——探测会消耗掉开头的帧，而文件是从头播的。
+        """
+        if is_file:
+            return True
+        for _ in range(attempts):
+            ok, frame = cap.read()
+            if ok and frame is not None:
+                return True
+            time.sleep(0.05)
+        return False
 
     def read(self):
-        ok, frame = self.cap.read()
-        if not ok or frame is None:
-            return None
+        while True:
+            ok, frame = self.cap.read()
+            if ok and frame is not None:
+                break
+            if self.is_file:
+                return None              # 文件读完就是真的结束
+            # 摄像头单次读失败是常态（切分辨率、USB 抖动、系统抢占），
+            # 连续失败够多次才认定断流，否则监控会莫名其妙停掉
+            self._miss += 1
+            if self._miss >= self.MAX_READ_MISS:
+                return None
+            time.sleep(0.02)
+
+        self._miss = 0
         if self.flip:
             frame = cv2.flip(frame, 1)
         if self.is_file:

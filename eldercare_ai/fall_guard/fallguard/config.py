@@ -35,10 +35,25 @@ DEFAULTS: dict[str, Any] = {
     },
     "alert": {
         "cancel_seconds": 10,
+        # 住户主动求助的取消窗口。设得短是因为意图明确，不该让求助者干等；
+        # 但不设 0——误识别一次就是一通真实电话，2 秒够按下取消
+        "help_cancel_seconds": 2,
+        "cancel_seconds_by_type": {},
         "speak": True,
         "alarm_sound": True,
         "voice": "",
         "suppress_call_windows": [],
+    },
+    # 求助手势：举手至耳边并保持
+    "gesture": {
+        "near_ratio": 0.75,            # 手腕到耳朵距离 ÷ 肩宽，小于此值算"靠近"
+        "hold_seconds": 3.0,           # 保持多久才触发
+        "cooldown_seconds": 60.0,      # 触发后的静默期
+        # 手腕关键点置信度阈值。实测自然垂手时只有 0.25~0.45（手臂常被
+        # 身体遮挡），举到耳边时会升高但未必过 0.5。设太高会让手势根本
+        # 触发不了；真正防误触发的是"保持 3 秒 + 高于肩膀"两条判据。
+        "min_keypoint_conf": 0.3,
+        "grace_seconds": 0.6,          # 容忍关键点短暂丢失
     },
     "agent": {
         "enabled": False,
@@ -58,8 +73,29 @@ DEFAULTS: dict[str, Any] = {
         "contacts": [],
         "aliyun": {},
         "tencent": {},
+        "volc": {},
+        "spug": {},
     },
     "log": {"dir": "data"},
+    # 感知插件：不配时默认只启跌倒视觉，与引入插件机制之前的行为一致
+    "sensors": {"enabled": ["fall_vision", "help_gesture"]},
+    # 身份识别链：按顺序尝试，先返回非空者胜出。认不出人不阻断处置
+    "identity": {"providers": ["wristband_id", "room_binding"],
+                 "rooms": [], "bands": []},
+    # 外部设备（手环等）。空列表 = 不接设备，纯视觉模式
+    "devices": {"sources": []},
+    # 风险预警通路：只记录与提示，不外呼
+    "risk": {"enabled": True, "warn_score": 45.0, "elevated_score": 70.0,
+             "cooldown_seconds": 600},
+    "memory": {"dir": "data/memory", "history_days": 7},
+    # 可穿戴健康数据的长期档案。与 SignalBus 分开存：总线只留几分钟
+    # （当前读数），档案留数周（个体基线）
+    "health": {
+        "dir": "data/health",
+        "min_interval_seconds": 60,     # 同一指标的最小记录间隔，防手环刷屏
+        "baseline_days": 30,            # 个体基线取多少天
+        "trend_days": 14,               # 趋势比较的窗口
+    },
 }
 
 

@@ -19,7 +19,15 @@ from ..events import EventRecord, iso
 
 @dataclass
 class ToolContext:
-    """工具运行所需的一切；避免工具直接访问全局状态。"""
+    """工具运行所需的一切；避免工具直接访问全局状态。
+
+    narration 由感知插件的 narrate() 提供，决定播报说什么——框架与工具
+    都不知道"跌倒"是什么，事件语义全部来自插件。
+    memory 是住户记忆摘要，进智能体 prompt。
+
+    state 是工具私有的幂等状态袋：工具自己往里放键，不要为了一个工具的
+    去重需求去改这个 dataclass（原先的 _spoken 就是这么长出来的）。
+    """
 
     record: EventRecord
     gateway: CallGateway
@@ -28,11 +36,23 @@ class ToolContext:
     slots: dict[str, str]
     called: list[CallResult] = field(default_factory=list)
     log: Callable[[str], None] = print
-    _spoken: set[str] = field(default_factory=set)
+    narration: dict[str, str] = field(default_factory=dict)
+    memory: str = ""
+    #: 健康趋势摘要（聚合统计量，不含逐条读数）。隐私边界在这里划定：
+    #: 原始时序会暴露住户的作息细节（几点起夜、几点出门），
+    #: 而趋势判断用不到那个粒度。
+    health: str = ""
+    state: dict[str, Any] = field(default_factory=dict)
 
     def note(self, text: str) -> None:
         self.record.notes.append(text)
         self.log(text)
+
+    def scratch(self, key: str, factory: Callable[[], Any]) -> Any:
+        """取/建某个工具的私有状态。"""
+        if key not in self.state:
+            self.state[key] = factory()
+        return self.state[key]
 
 
 def _record_action(ctx: ToolContext, tool: str, args: dict[str, Any],
@@ -53,10 +73,11 @@ def tool_speak(ctx: ToolContext, text: str = "", **_) -> dict[str, Any]:
     text = (text or "").strip()
     if not text:
         return {"ok": False, "reason": "text 为空"}
+    spoken = ctx.scratch("spoken", set)
     key = text[:80]
-    if key in ctx._spoken:
+    if key in spoken:
         return {"ok": True, "skipped": "该文本已播报过"}
-    ctx._spoken.add(key)
+    spoken.add(key)
     ctx.alerter.speak(text)
     return {"ok": True, "spoken": text}
 
@@ -85,10 +106,11 @@ def tool_place_call(ctx: ToolContext, contact_id: str = "", reason: str = "",
             "code": res.code, "message": res.message, "dry_run": res.dry_run}
 
 
-def tool_notify_desktop(ctx: ToolContext, title: str = "跌倒预警",
-                        message: str = "", **_) -> dict[str, Any]:
+def tool_notify_desktop(ctx: ToolContext, title: str = "", message: str = "",
+                        **_) -> dict[str, Any]:
     """弹出系统通知。"""
-    ctx.alerter.notify(title, message or "检测到疑似跌倒")
+    title = title or ctx.narration.get("title", "预警")
+    ctx.alerter.notify(title, message or ctx.narration.get("desktop", "检测到异常"))
     return {"ok": True}
 
 
@@ -102,10 +124,49 @@ def tool_get_contacts(ctx: ToolContext, **_) -> dict[str, Any]:
 def tool_get_evidence(ctx: ToolContext, **_) -> dict[str, Any]:
     """查询本次事件已留存的证据与判定特征。"""
     return {
+        "event_type": ctx.record.event_type,
         "features": ctx.record.features,
         "trigger": ctx.record.trigger,
         "confidence": ctx.record.confidence,
+        "grading": ctx.record.grading,
         "evidence": ctx.record.evidence,
+    }
+
+
+def tool_get_resident_history(ctx: ToolContext, **_) -> dict[str, Any]:
+    """查询该住户的画像与近期事件史。
+
+    让智能体能主动问"这人以前怎么样"，而不是只能被动接受 prompt 里
+    塞的那段摘要。记忆由框架在处置前召回，这里只是暴露给模型。
+    """
+    return {
+        "resident": ctx.scene.get("resident_name", ""),
+        "resident_id": ctx.record.resident_id,
+        "summary": ctx.memory or "无历史记录",
+        "history": (ctx.record.memory or {}).get("history", {}),
+        "profile": (ctx.record.memory or {}).get("profile", {}),
+    }
+
+
+def tool_get_health_trend(ctx: ToolContext, **_) -> dict[str, Any]:
+    """查询该住户来自可穿戴设备的健康趋势（静息心率、HRV、步态、睡眠等）。
+
+    只返回聚合统计量与趋势方向，不含逐条读数——那个粒度会暴露住户的
+    作息细节，而判断趋势用不到。
+
+    注意这些数据**按小时甚至按天更新**，说明的是"最近状态在变差"，
+    不是"此刻有危险"。不要拿它推翻刚刚由确定性规则作出的现场判定。
+    """
+    mem = ctx.record.memory or {}
+    text = ctx.health or mem.get("health", "")
+    if not text:
+        return {"available": False,
+                "reason": "该住户没有接入可穿戴设备，或尚未积累足够数据"}
+    return {
+        "available": True,
+        "summary": text,
+        "concerning": mem.get("health_concerning", []),
+        "note": "按天更新的趋势数据，反映近期状态变化，不代表此刻的紧急程度",
     }
 
 
@@ -122,6 +183,8 @@ def tool_finish(ctx: ToolContext, summary: str = "", level: str = "",
 REGISTRY: dict[str, Callable[..., dict[str, Any]]] = {
     "get_contacts": tool_get_contacts,
     "get_evidence": tool_get_evidence,
+    "get_resident_history": tool_get_resident_history,
+    "get_health_trend": tool_get_health_trend,
     "speak": tool_speak,
     "notify_desktop": tool_notify_desktop,
     "place_call": tool_place_call,
@@ -141,7 +204,27 @@ SCHEMAS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "get_evidence",
-            "description": "查询本次判定的传感器特征、触发路径与已留存证据。",
+            "description": "查询本次判定的传感器特征、触发路径、分级依据与已留存证据。",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_resident_history",
+            "description": ("查询该住户的画像（跌倒史、认知症、用药）与近期事件史。"
+                            "历史误报多时处置要更谨慎，但不得因此跳过外呼。"),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_health_trend",
+            "description": ("查询该住户来自可穿戴设备（Apple Watch 等）的健康趋势："
+                            "静息心率、心率变异性、步行稳定性、睡眠等相对其个体基线"
+                            "的变化。这些数据按天更新，说明的是近期状态走向，"
+                            "不代表此刻的紧急程度，不要用它推翻现场判定。"),
             "parameters": {"type": "object", "properties": {}},
         },
     },
@@ -179,8 +262,7 @@ SCHEMAS: list[dict[str, Any]] = [
         "function": {
             "name": "place_call",
             "description": ("向指定联系人拨打语音电话并播报四要素（位置、姓名、事件、时间）。"
-                            "先呼护理方（role=caregiver），确认无法联系时再呼家属。"),
-            "parameters": {
+                            "先呼护理方（role=caregiver），确认无法联系时再呼家属。"),            "parameters": {
                 "type": "object",
                 "properties": {
                     "contact_id": {"type": "string", "description": "联系人 id"},

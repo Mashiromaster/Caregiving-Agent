@@ -8,8 +8,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-# 检测逻辑真正用到的点位，其余一律丢弃
-KEYS = ("nose", "l_sho", "r_sho", "l_hip", "r_hip", "l_knee", "r_knee", "l_ank", "r_ank")
+# 检测逻辑真正用到的点位，其余一律丢弃。
+# 前 9 个供跌倒判定（躯干角、质心）；后 4 个供手势识别（手腕相对耳朵的位置）。
+KEYS = ("nose", "l_sho", "r_sho", "l_hip", "r_hip", "l_knee", "r_knee", "l_ank", "r_ank",
+        "l_wri", "r_wri", "l_ear", "r_ear")
 
 
 @dataclass

@@ -3,79 +3,21 @@
 
 设计取舍：events.jsonl 只追加不修改，标注写入独立的 labels.jsonl，
 读取时合并。这样原始记录始终可审计，符合技术文档里"动作留痕不可篡改"的要求。
+
+EventRecord / new_event_id / iso 已迁至 core/events.py（框架核心），
+这里保留再导出以兼容既有调用方（selftest、web 等）。
 """
 from __future__ import annotations
 
 import json
 import threading
 import time
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator
 
+from .core.events import EventRecord, SensorEvent, iso, new_event_id
 
-def new_event_id(ts: float | None = None) -> str:
-    ts = ts or time.time()
-    lt = time.localtime(ts)
-    return time.strftime("EV%Y%m%d-%H%M%S", lt) + f"-{int(ts * 1000) % 1000:03d}"
-
-
-def iso(ts: float) -> str:
-    lt = time.localtime(ts)
-    base = time.strftime("%Y-%m-%dT%H:%M:%S", lt)
-    offset = time.strftime("%z", lt)
-    return f"{base}{offset[:3]}:{offset[3:]}" if offset else base
-
-
-@dataclass
-class EventRecord:
-    """一次事件的完整记录，随处置过程逐步补全后一次性落盘。"""
-
-    event_id: str
-    detected_at: float
-    event_type: str = "fall"
-    level: str = "L3"
-    trigger: str = ""
-    confidence: float = 0.0
-    room: str = ""
-    resident: str = ""
-    features: dict[str, Any] = field(default_factory=dict)
-    evidence: dict[str, Any] = field(default_factory=dict)
-    timeline: list[dict[str, Any]] = field(default_factory=list)
-    actions: list[dict[str, Any]] = field(default_factory=list)
-    agent: dict[str, Any] = field(default_factory=dict)
-    outcome: str = "open"
-    cancelled: bool = False
-    fallback_fired: bool = False
-    notes: list[str] = field(default_factory=list)
-
-    def stage(self, stage: str, **extra: Any) -> None:
-        entry = {"at": iso(time.time()), "stage": stage}
-        entry.update(extra)
-        self.timeline.append(entry)
-
-    def to_dict(self) -> dict[str, Any]:
-        data = {
-            "event_id": self.event_id,
-            "detected_at": iso(self.detected_at),
-            "detected_at_ts": round(self.detected_at, 3),
-            "event_type": self.event_type,
-            "level": self.level,
-            "trigger": self.trigger,
-            "confidence": round(self.confidence, 3),
-            "room": self.room,
-            "resident": self.resident,
-            "features": self.features,
-            "evidence": self.evidence,
-            "timeline": self.timeline,
-            "actions": self.actions,
-            "agent": self.agent,
-            "outcome": self.outcome,
-            "cancelled": self.cancelled,
-            "fallback_fired": self.fallback_fired,
-            "notes": self.notes,
-        }
-        return data
+__all__ = ["EventLog", "EventRecord", "SensorEvent", "iso", "new_event_id"]
 
 
 class EventLog:
@@ -129,24 +71,45 @@ class EventLog:
                 out[row["event_id"]] = row
         return out
 
-    def events(self, limit: int | None = None) -> list[dict[str, Any]]:
+    def events(self, limit: int | None = None, event_type: str | None = None,
+               resident_id: str | None = None) -> list[dict[str, Any]]:
         rows = list(self._read(self.events_path))
         labels = self.labels()
         for row in rows:
             label = labels.get(row.get("event_id", ""))
             row["label"] = label
+            # 旧记录没有这两个字段（分别在启用 event_type 与身份层之前写入），
+            # 补默认值让下游不必到处判空
+            row.setdefault("event_type", "fall")
+            row.setdefault("resident_id", "")
+        if event_type:
+            rows = [r for r in rows if r.get("event_type") == event_type]
+        if resident_id:
+            rows = [r for r in rows if r.get("resident_id") == resident_id]
         return rows[-limit:] if limit else rows
 
-    def stats(self) -> dict[str, Any]:
-        rows = self.events()
-        total = len(rows)
-        false_alarms = sum(1 for r in rows if (r.get("label") or {}).get("is_false_alarm"))
-        cancelled = sum(1 for r in rows if r.get("cancelled"))
-        called = sum(1 for r in rows if r.get("outcome") == "called")
+    def event_types(self) -> list[str]:
+        """日志里出现过的事件类型，供前端做筛选项。"""
+        seen = {str(r.get("event_type") or "fall") for r in self.events()}
+        return sorted(seen)
+
+    def stats(self, event_type: str | None = None) -> dict[str, Any]:
+        rows = self.events(event_type=event_type)
+        # 不假设"处置 = 打电话"：预警类事件的正常归宿就是只记录不外呼，
+        # 把它们算成"未处置"会让统计看起来像系统一直在失败
+        handled = {"called", "cancelled", "suppressed", "logged"}
+        by_type: dict[str, int] = {}
+        for r in rows:
+            key = str(r.get("event_type") or "fall")
+            by_type[key] = by_type.get(key, 0) + 1
         return {
-            "total": total,
-            "called": called,
-            "cancelled": cancelled,
-            "labelled_false_alarm": false_alarms,
+            "total": len(rows),
+            "called": sum(1 for r in rows if r.get("outcome") == "called"),
+            "cancelled": sum(1 for r in rows if r.get("cancelled")),
+            "labelled_false_alarm": sum(
+                1 for r in rows if (r.get("label") or {}).get("is_false_alarm")),
             "unlabelled": sum(1 for r in rows if not r.get("label")),
+            "unresolved": sum(1 for r in rows
+                              if str(r.get("outcome")) not in handled),
+            "by_type": by_type,
         }
