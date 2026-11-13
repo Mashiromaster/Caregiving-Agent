@@ -16,7 +16,7 @@ from __future__ import annotations
 import collections
 import threading
 import time
-from typing import Any
+from typing import Any, Callable
 
 import cv2
 
@@ -172,8 +172,9 @@ class WebGuard(FallGuard):
 class Runner:
     """运行器的生命周期管理。同一时刻只允许一个 FallGuard 实例。"""
 
-    def __init__(self) -> None:
+    def __init__(self, open_guard: Callable[[Callable[[], WebGuard]], WebGuard] | None = None) -> None:
         self.hub = Hub()
+        self._open_guard = open_guard or (lambda create: create())
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
         self.guard: WebGuard | None = None
@@ -250,9 +251,11 @@ class Runner:
             self.state = "starting"
             self.options = dict(options)
             self.hub.clear_frame()
+            self.guard = None
+            self.started_at = None
             try:
-                guard = WebGuard(cfg, self.hub,
-                                 force_backend=options.get("backend") or None)
+                guard = self._open_guard(lambda: WebGuard(
+                    cfg, self.hub, force_backend=options.get("backend") or None))
             except Exception as exc:
                 self.state = "stopped"
                 self.error = f"{type(exc).__name__}: {exc}"

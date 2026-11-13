@@ -15,13 +15,15 @@ import hmac
 import mimetypes
 import os
 import posixpath
+import queue
 import re
+import sys
 import threading
 import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .. import config as cfgmod
 from . import doctor, schema
@@ -35,9 +37,11 @@ EVENT_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 class App:
     """把路由处理与 HTTP 细节分开，便于不起服务器直接测。"""
 
-    def __init__(self, config_path: str | None = None):
+    def __init__(self, config_path: str | None = None,
+                 camera_dispatch: Callable[[Callable[[], Any]], Any] | None = None):
         self.config_path = config_path
-        self.runner = Runner()
+        self.camera_dispatch = camera_dispatch or (lambda work: work())
+        self.runner = Runner(open_guard=self.camera_dispatch)
         self._lock = threading.Lock()
 
     # ------------------------------------------------------------ 配置
@@ -68,8 +72,8 @@ class App:
         if path == "/api/config":
             return 200, self._config_payload()
         if path == "/api/doctor":
-            return 200, doctor.report(self.config_path,
-                                      running=self.runner.alive)
+            return 200, self.camera_dispatch(
+                lambda: doctor.report(self.config_path, running=self.runner.alive))
         if path == "/api/logs":
             since = _int(query.get("since", ["0"])[0], 0)
             rows, latest = self.runner.hub.logs(since)
@@ -510,9 +514,43 @@ class Handler(BaseHTTPRequestHandler):
         self._send(code, payload)
 
 
+class _MainThreadCamera:
+    """macOS 的 AVFoundation 权限弹窗只能从 Python 主线程发起。"""
+
+    def __init__(self) -> None:
+        self._tasks: queue.Queue[tuple[Callable[[], Any], threading.Event,
+                                      dict[str, Any]]] = queue.Queue()
+
+    def call(self, work: Callable[[], Any]) -> Any:
+        if threading.current_thread() is threading.main_thread():
+            return work()
+        done = threading.Event()
+        result: dict[str, Any] = {}
+        self._tasks.put((work, done, result))
+        done.wait()
+        if "error" in result:
+            raise result["error"]
+        return result["value"]
+
+    def run_one(self, timeout: float = 0.2) -> None:
+        try:
+            work, done, result = self._tasks.get(timeout=timeout)
+        except queue.Empty:
+            return
+        try:
+            result["value"] = work()
+        except BaseException as exc:
+            result["error"] = exc
+            if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                raise
+        finally:
+            done.set()
+
+
 def serve(host: str = "127.0.0.1", port: int = 8777,
           config_path: str | None = None, *, open_browser: bool = True) -> int:
-    app = App(config_path)
+    camera = _MainThreadCamera() if sys.platform == "darwin" else None
+    app = App(config_path, camera_dispatch=camera.call if camera else None)
     handler = type("BoundHandler", (Handler,), {"app": app})
     httpd = ThreadingHTTPServer((host, port), handler)
     httpd.daemon_threads = True
@@ -542,8 +580,16 @@ def serve(host: str = "127.0.0.1", port: int = 8777,
 
         threading.Thread(target=launch, daemon=True).start()
 
+    server_thread = None
     try:
-        httpd.serve_forever()
+        if camera:
+            server_thread = threading.Thread(target=httpd.serve_forever,
+                                             name="fallguard-http", daemon=True)
+            server_thread.start()
+            while server_thread.is_alive():
+                camera.run_one()
+        else:
+            httpd.serve_forever()
     except KeyboardInterrupt:
         print("\n[停止] 收到 Ctrl-C")
     finally:
@@ -552,4 +598,6 @@ def serve(host: str = "127.0.0.1", port: int = 8777,
             app.runner.stop(timeout=30)
         httpd.shutdown()
         httpd.server_close()
+        if server_thread:
+            server_thread.join(timeout=2)
     return 0

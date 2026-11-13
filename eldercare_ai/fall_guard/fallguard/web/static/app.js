@@ -333,6 +333,8 @@ function renderLive(root) {
         el('label', { text: '视频源（留空用配置值）' }),
         el('input', { type: 'text', id: 'opt-source', placeholder: '0 / demo / screen / xx.mp4',
                       disabled: running }),
+        el('small', { class: 'source-help',
+          text: '打开页面不会启用摄像头。iPhone 断开或重连后编号可能变化；启动失败时可改试 0、1，或用 demo 演练。' }),
       ]),
       el('div', {}, [
         el('label', { text: '姿态后端' }),
@@ -1141,14 +1143,21 @@ async function startRun() {
     quiet: checked('#opt-quiet'),
   };
   $('#btn-start').disabled = true;
-  const res = await post('/api/run/start', body);
-  if (!res.body.ok) {
-    toast(res.body.reason || '启动失败', 'bad');
-  } else {
-    toast('已启动监测', 'ok');
-    if (S.tab !== 'live') setTab('live');
+  $('#top-note').textContent = '正在连接摄像头…';
+  try {
+    const res = await post('/api/run/start', body);
+    if (!res.body?.ok) {
+      toast(res.body?.reason || '启动失败，请查看运行日志', 'bad');
+    } else {
+      toast('已启动监测', 'ok');
+      if (S.tab !== 'live') setTab('live');
+    }
+  } catch (error) {
+    toast(`连接监测服务失败：${error.message}`, 'bad');
+  } finally {
+    try { await refreshStatus(); }
+    catch { $('#btn-start').disabled = false; }
   }
-  await refreshStatus();
 }
 
 async function stopRun() {
@@ -1166,7 +1175,7 @@ async function stopRun() {
 function applyStatusToChrome() {
   const st = S.status;
   const running = st && st.state === 'running';
-  $('#btn-start').disabled = !!running;
+  $('#btn-start').disabled = !!st && ['starting', 'running', 'stopping'].includes(st.state);
   $('#btn-stop').disabled = !running;
 
   const pill = runStatePill(st);
@@ -1184,6 +1193,7 @@ function applyStatusToChrome() {
   }
 
   if (st && st.error) $('#top-note').textContent = st.error;
+  else if (!st || st.state !== 'starting') $('#top-note').textContent = '';
 }
 
 let lastState = null;

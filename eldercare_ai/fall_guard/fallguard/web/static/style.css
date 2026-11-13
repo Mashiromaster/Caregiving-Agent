@@ -288,6 +288,7 @@ main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 
 .launch { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; }
 .launch label { display: block; font-size: 11.5px; color: var(--text-3); margin-bottom: 5px; }
+.launch .source-help { display: block; margin-top: 5px; color: var(--text-3); line-height: 1.45; }
 .launch .checks { display: flex; flex-direction: column; gap: 7px; justify-content: center; }
 
 /* ----------------------------------------------------------- 表单 */
